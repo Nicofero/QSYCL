@@ -36,7 +36,26 @@ target_include_directories(quantum_backend_cpu PUBLIC
 )
 target_link_libraries(quantum_core PUBLIC quantum_backend_cpu)
 target_link_libraries(quantum_backend_cpu PUBLIC quantum_core)
+target_compile_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+target_link_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+
+# --- GPU backend ---
+add_library(quantum_backend_gpu
+    backends/gpu/gpu_backend.cpp
+)
+target_include_directories(quantum_backend_gpu PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/backends/gpu
+)
+target_link_libraries(quantum_core PUBLIC quantum_backend_gpu)
+target_link_libraries(quantum_backend_gpu PUBLIC quantum_core)
+
+target_compile_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+target_link_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
 
 # --- Example ---
-add_executable(bell_state examples/bell_state.cpp)
-target_link_libraries(bell_state PRIVATE quantum_core)
+add_executable(bell_state_gpu examples/bell_state_gpu.cpp)
+target_link_libraries(bell_state_gpu PRIVATE quantum_core)
+
+target_compile_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+target_link_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)

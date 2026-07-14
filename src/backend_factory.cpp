@@ -1,5 +1,6 @@
 #include "quantum/backend_factory.hpp"
 #include "../backends/cpu/cpu_backend.hpp"
+#include "../backends/gpu/gpu_backend.hpp"
 #include <stdexcept>
 
 namespace quantum {
@@ -9,9 +10,7 @@ std::unique_ptr<Backend> BackendFactory::create(DeviceType type) {
         case DeviceType::CPU:
             return std::make_unique<backends::CPUBackend>();
         case DeviceType::GPU:
-            throw std::runtime_error(
-                "GPU backend not implemented yet -- add backends/gpu/gpu_backend.{hpp,cpp} "
-                "and wire it up here, following backends/cpu as a template.");
+            return std::make_unique<backends::GPUBackend>();
         case DeviceType::FPGA:
         case DeviceType::FPGA_EMULATOR:
             throw std::runtime_error("FPGA backend not implemented yet.");
