@@ -98,13 +98,17 @@ void CPUBackend::apply_gate(const GateOp& op) {
         case GateType::Z:  apply_single_qubit_matrix(op.qubits[0], Z()); break;
         case GateType::S:  apply_single_qubit_matrix(op.qubits[0], S()); break;
         case GateType::T:  apply_single_qubit_matrix(op.qubits[0], T()); break;
+        case GateType::U:  apply_single_qubit_matrix(op.qubits[0], U(op.params[0], op.params[1], op.params[2])); break;
         case GateType::RX: apply_single_qubit_matrix(op.qubits[0], RX(op.params[0])); break;
         case GateType::RY: apply_single_qubit_matrix(op.qubits[0], RY(op.params[0])); break;
         case GateType::RZ: apply_single_qubit_matrix(op.qubits[0], RZ(op.params[0])); break;
         case GateType::CNOT: apply_controlled_matrix(op.qubits[0], op.qubits[1], X()); break;
         case GateType::CZ:   apply_controlled_matrix(op.qubits[0], op.qubits[1], Z()); break;
+        case GateType::CRX:  apply_controlled_matrix(op.qubits[0], op.qubits[1], RX(op.params[0])); break;
+        case GateType::CRY:  apply_controlled_matrix(op.qubits[0], op.qubits[1], RY(op.params[0])); break;
+        case GateType::CRZ:  apply_controlled_matrix(op.qubits[0], op.qubits[1], RZ(op.params[0])); break;
         case GateType::SWAP: apply_swap_gate(op.qubits[0], op.qubits[1]); break;
-        case GateType::MEASURE: /* handled by runtime via sample(); no-op on state */ break;
+        case GateType::MEASURE: break;
     }
 }
 

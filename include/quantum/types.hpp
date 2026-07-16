@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cmath>
 #include <string>
+#include <ostream>
 
 namespace quantum {
 
@@ -25,14 +26,26 @@ struct Complex {
     }
     Complex conj() const { return {re, -im}; }
     double norm() const { return re * re + im * im; }
+    
+    friend std::ostream& operator<<(std::ostream& os, const Complex& c) {
+    os << c.re;
+
+    if (c.im >= 0)
+        os << " + " << c.im << "i";
+    else
+        os << " - " << -c.im << "i";
+
+    return os;
+}
 };
 
 // Every gate the Circuit API can emit. MEASURE is included so the runtime
 // can treat measurement as just another scheduled operation.
 enum class GateType {
-    H, X, Y, Z, S, T,
+    H, X, Y, Z, S, T, U,
     RX, RY, RZ,
-    CNOT, CZ, SWAP,
+    CONTROL, DAGGER,
+    CNOT, CZ, SWAP, CRX, CRY, CRZ,
     MEASURE
 };
 

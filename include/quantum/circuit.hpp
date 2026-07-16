@@ -20,6 +20,9 @@ public:
     Circuit& z(std::size_t qubit);
     Circuit& s(std::size_t qubit);
     Circuit& t(std::size_t qubit);
+    
+    // --- Universal single-qubit gate ---
+    Circuit& u(std::size_t qubit, double theta, double phi, double lambda);
 
     // --- Parameterized single-qubit rotations (angle in radians) ---
     Circuit& rx(std::size_t qubit, double theta);
@@ -30,6 +33,12 @@ public:
     Circuit& cnot(std::size_t control, std::size_t target);
     Circuit& cz(std::size_t control, std::size_t target);
     Circuit& swap(std::size_t qubit_a, std::size_t qubit_b);
+    Circuit& crx(std::size_t control, std::size_t target, double theta);
+    Circuit& cry(std::size_t control, std::size_t target, double theta);
+    Circuit& crz(std::size_t control, std::size_t target, double theta);
+
+    // -- Universal controlled gate (control qubit, target qubit, 2x2 unitary) ---
+    // Circuit& controlled(std::size_t control, std::size_t target, std::string label);
 
     // Mark a qubit for classical readout. If none are marked explicitly,
     // the runtime measures all qubits by default.

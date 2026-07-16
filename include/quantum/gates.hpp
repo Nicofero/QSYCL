@@ -21,6 +21,22 @@ inline Matrix2x2 T() {
     return {Complex(1), Complex(0), Complex(0), Complex(std::cos(M_PI / 4), std::sin(M_PI / 4))};
 }
 
+inline Matrix2x2 U(double theta, double phi, double lambda) {
+    const double c = std::cos(theta / 2);
+    const double s = std::sin(theta / 2);
+
+    const Complex ephi{std::cos(phi), std::sin(phi)};
+    const Complex elambda{std::cos(lambda), std::sin(lambda)};
+    const Complex esum{std::cos(phi + lambda), std::sin(phi + lambda)};
+
+    return {
+        Complex(c),
+        Complex(-s) * elambda,
+        Complex(s) * ephi,
+        Complex(c) * esum
+    };
+}
+
 inline Matrix2x2 RX(double theta) {
     double c = std::cos(theta / 2), s = std::sin(theta / 2);
     return {Complex(c), Complex(0, -s), Complex(0, -s), Complex(c)};

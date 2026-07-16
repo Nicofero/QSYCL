@@ -27,6 +27,10 @@ Circuit& Circuit::z(std::size_t qubit)  { return add_gate(GateType::Z, {qubit}, 
 Circuit& Circuit::s(std::size_t qubit)  { return add_gate(GateType::S, {qubit}, {}, "S"); }
 Circuit& Circuit::t(std::size_t qubit)  { return add_gate(GateType::T, {qubit}, {}, "T"); }
 
+Circuit& Circuit::u(std::size_t qubit, double theta, double phi, double lambda) {
+    return add_gate(GateType::U, {qubit}, {theta, phi, lambda}, "U");
+}
+
 Circuit& Circuit::rx(std::size_t qubit, double theta) {
     return add_gate(GateType::RX, {qubit}, {theta}, "RX");
 }
@@ -49,6 +53,26 @@ Circuit& Circuit::swap(std::size_t qubit_a, std::size_t qubit_b) {
     if (qubit_a == qubit_b) throw std::invalid_argument("SWAP qubits must differ");
     return add_gate(GateType::SWAP, {qubit_a, qubit_b}, {}, "SWAP");
 }
+
+Circuit& Circuit::crx(std::size_t control, std::size_t target, double theta) {
+    if (control == target) throw std::invalid_argument("CRX control and target must differ");
+    return add_gate(GateType::CRX, {control, target}, {theta}, "CRX");
+}
+
+Circuit& Circuit::cry(std::size_t control, std::size_t target, double theta) {
+    if (control == target) throw std::invalid_argument("CRY control and target must differ");
+    return add_gate(GateType::CRY, {control, target}, {theta}, "CRY");
+}
+
+Circuit& Circuit::crz(std::size_t control, std::size_t target, double theta) {
+    if (control == target) throw std::invalid_argument("CRZ control and target must differ");
+    return add_gate(GateType::CRZ, {control, target}, {theta}, "CRZ");
+}
+
+// Circuit& Circuit::controlled(std::size_t control, std::size_t target, std::string label) {
+//     if (control == target) throw std::invalid_argument("Controlled gate control and target must differ");
+//     return add_gate(GateType::CONTROL, {control, target}, {}, label);
+// }
 
 Circuit& Circuit::measure(std::size_t qubit) {
     if (qubit >= num_qubits_) throw std::out_of_range("Qubit index out of range");

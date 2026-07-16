@@ -3,6 +3,9 @@ project(quantum_sycl CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+option(ENABLE_GPU_BACKEND "Build the SYCL GPU backend" OFF)
+
+
 
 # This project targets Intel oneAPI DPC++ (icpx). Configure with:
 #   cmake -B build -DCMAKE_CXX_COMPILER=icpx
@@ -26,6 +29,10 @@ target_include_directories(quantum_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+if(ENABLE_GPU_BACKEND)
+    target_compile_definitions(quantum_core PRIVATE QUANTUM_ENABLE_GPU)
+endif()
+
 # --- CPU backend ---
 add_library(quantum_backend_cpu
     backends/cpu/cpu_backend.cpp
@@ -36,26 +43,35 @@ target_include_directories(quantum_backend_cpu PUBLIC
 )
 target_link_libraries(quantum_core PUBLIC quantum_backend_cpu)
 target_link_libraries(quantum_backend_cpu PUBLIC quantum_core)
-target_compile_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
-target_link_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+
+if(ENABLE_GPU_BACKEND)
+    target_compile_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+    target_link_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+endif()
+
 
 # --- GPU backend ---
-add_library(quantum_backend_gpu
-    backends/gpu/gpu_backend.cpp
-)
-target_include_directories(quantum_backend_gpu PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/backends/gpu
-)
-target_link_libraries(quantum_core PUBLIC quantum_backend_gpu)
-target_link_libraries(quantum_backend_gpu PUBLIC quantum_core)
+if(ENABLE_GPU_BACKEND)
+    add_library(quantum_backend_gpu
+        backends/gpu/gpu_backend.cpp
+    )
+    target_include_directories(quantum_backend_gpu PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/backends/gpu
+    )
+    target_link_libraries(quantum_core PUBLIC quantum_backend_gpu)
+    target_link_libraries(quantum_backend_gpu PUBLIC quantum_core)
 
-target_compile_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
-target_link_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+    target_compile_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+    target_link_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+endif()
 
 # --- Example ---
-add_executable(bell_state_gpu examples/bell_state_gpu.cpp)
-target_link_libraries(bell_state_gpu PRIVATE quantum_core)
+# add_executable(bell_state_gpu examples/bell_state_gpu.cpp)
+# target_link_libraries(bell_state_gpu PRIVATE quantum_core)
 
-target_compile_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
-target_link_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+# target_compile_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+# target_link_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+
+add_executable(bell_state examples/bell_state.cpp)
+target_link_libraries(bell_state PRIVATE quantum_core)

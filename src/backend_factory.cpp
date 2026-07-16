@@ -1,6 +1,10 @@
 #include "quantum/backend_factory.hpp"
 #include "../backends/cpu/cpu_backend.hpp"
+
+#ifdef QUANTUM_ENABLE_GPU
 #include "../backends/gpu/gpu_backend.hpp"
+#endif
+
 #include <stdexcept>
 
 namespace quantum {
@@ -10,7 +14,11 @@ std::unique_ptr<Backend> BackendFactory::create(DeviceType type) {
         case DeviceType::CPU:
             return std::make_unique<backends::CPUBackend>();
         case DeviceType::GPU:
-            return std::make_unique<backends::GPUBackend>();
+            #ifdef QUANTUM_ENABLE_GPU
+                return std::make_unique<backends::GPUBackend>();
+            #else
+                throw std::runtime_error("GPU backend was not built.");
+            #endif
         case DeviceType::FPGA:
         case DeviceType::FPGA_EMULATOR:
             throw std::runtime_error("FPGA backend not implemented yet.");

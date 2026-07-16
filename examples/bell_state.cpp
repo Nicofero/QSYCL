@@ -6,8 +6,7 @@ int main() {
     using namespace quantum;
 
     // 1. Build the circuit with the user-facing API. No device concepts here.
-    Circuit bell(2);
-    bell.h(0).cnot(0, 1);
+    Circuit ghz(1);
 
     // 2. Pick a device and get a runtime for it. Swapping DeviceType::CPU
     //    for DeviceType::GPU (once implemented) is the only line that changes.
@@ -16,16 +15,16 @@ int main() {
     std::cout << "Running on: " << runtime.device_name() << "\n\n";
 
     // 3. Inspect the exact state vector (fine for small circuits).
-    runtime.run(bell);
+    runtime.run(ghz);
     std::cout << "State vector:\n";
     auto state = runtime.state_vector();
     for (std::size_t i = 0; i < state.size(); ++i) {
-        std::cout << "  |" << i << "> : " << state[i].re << " + " << state[i].im << "i\n";
+        std::cout << "  |" << i << "> : " << state[i] << "\n";
     }
 
     // 4. Or sample it like real hardware would.
     std::cout << "\nMeasurement counts (1000 shots):\n";
-    auto counts = runtime.sample_counts(bell, 1000);
+    auto counts = runtime.sample_counts(ghz, 1000);
     for (const auto& [bitstring, count] : counts) {
         std::cout << "  " << bitstring << " : " << count << "\n";
     }
