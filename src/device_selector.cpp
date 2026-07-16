@@ -23,8 +23,7 @@ sycl::queue DeviceSelector::make_queue(DeviceType type) {
                        ? 1 : -1;
             });
         case DeviceType::CUSTOM:
-            throw std::invalid_argument(
-                "DeviceType::CUSTOM requires make_queue_custom() with a scoring function");
+            return sycl::queue(sycl::cpu_selector_v); // current idea, CUSTOM device represents CUNQA backend, which is CPU-based for now. This may change in the future.
     }
     throw std::invalid_argument("Unknown DeviceType");
 }

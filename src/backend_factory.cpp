@@ -5,6 +5,10 @@
 #include "../backends/gpu/gpu_backend.hpp"
 #endif
 
+#ifdef QUANTUM_ENABLE_CUNQA
+#include "../backends/cunqa/cunqa_backend.hpp"
+#endif
+
 #include <stdexcept>
 
 namespace quantum {
@@ -23,9 +27,11 @@ std::unique_ptr<Backend> BackendFactory::create(DeviceType type) {
         case DeviceType::FPGA_EMULATOR:
             throw std::runtime_error("FPGA backend not implemented yet.");
         case DeviceType::CUSTOM:
-            throw std::runtime_error(
-                "DeviceType::CUSTOM has no default backend -- construct your Backend "
-                "subclass directly instead of going through BackendFactory.");
+            #ifdef QUANTUM_ENABLE_CUNQA
+                return std::make_unique<backends::CUNQABackend>();
+            #else
+                throw std::runtime_error("CUNQA backend was not built.");
+            #endif
     }
     throw std::runtime_error("Unknown DeviceType");
 }

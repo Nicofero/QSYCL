@@ -4,7 +4,7 @@ project(quantum_sycl CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(ENABLE_GPU_BACKEND "Build the SYCL GPU backend" OFF)
-
+option(ENABLE_CUNQA_BACKEND "Build the CUNQA backend" OFF)
 
 
 # This project targets Intel oneAPI DPC++ (icpx). Configure with:
@@ -31,6 +31,10 @@ target_include_directories(quantum_core PUBLIC
 
 if(ENABLE_GPU_BACKEND)
     target_compile_definitions(quantum_core PRIVATE QUANTUM_ENABLE_GPU)
+endif()
+
+if(ENABLE_CUNQA_BACKEND)
+    target_compile_definitions(quantum_core PRIVATE QUANTUM_ENABLE_CUNQA)
 endif()
 
 # --- CPU backend ---
@@ -66,12 +70,31 @@ if(ENABLE_GPU_BACKEND)
     target_link_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
 endif()
 
-# --- Example ---
+# --- CUNQA backend ---
+if(ENABLE_CUNQA_BACKEND)
+    add_library(quantum_backend_cunqa
+        backends/cunqa/cunqa_backend.cpp
+    )
+    target_include_directories(quantum_backend_cunqa PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/backends/cunqa
+    )
+    target_link_libraries(quantum_core PUBLIC quantum_backend_cunqa)
+    target_link_libraries(quantum_backend_cunqa PUBLIC quantum_core)
+endif()
+
+# --- Example GPU ---
 # add_executable(bell_state_gpu examples/bell_state_gpu.cpp)
 # target_link_libraries(bell_state_gpu PRIVATE quantum_core)
 
 # target_compile_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
 # target_link_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
 
-add_executable(bell_state examples/bell_state.cpp)
-target_link_libraries(bell_state PRIVATE quantum_core)
+# --- Example CPU --- 
+# add_executable(bell_state examples/bell_state.cpp)
+# target_link_libraries(bell_state PRIVATE quantum_core)
+
+
+# --- Example CUNQA ---
+add_executable(bell_state_cunqa examples/bell_state_cunqa.cpp)
+target_link_libraries(bell_state_cunqa PRIVATE quantum_core)
