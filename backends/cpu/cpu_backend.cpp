@@ -96,8 +96,10 @@ void CPUBackend::apply_gate(const GateOp& op) {
         case GateType::X:  apply_single_qubit_matrix(op.qubits[0], X()); break;
         case GateType::Y:  apply_single_qubit_matrix(op.qubits[0], Y()); break;
         case GateType::Z:  apply_single_qubit_matrix(op.qubits[0], Z()); break;
-        case GateType::S:  apply_single_qubit_matrix(op.qubits[0], S()); break;
-        case GateType::T:  apply_single_qubit_matrix(op.qubits[0], T()); break;
+        case GateType::S:  if (op.dagger) apply_single_qubit_matrix(op.qubits[0], Sdg());
+                           else apply_single_qubit_matrix(op.qubits[0], S()); break;
+        case GateType::T:  if (op.dagger) apply_single_qubit_matrix(op.qubits[0], Tdg());
+                           else apply_single_qubit_matrix(op.qubits[0], T()); break;
         case GateType::U:  apply_single_qubit_matrix(op.qubits[0], U(op.params[0], op.params[1], op.params[2])); break;
         case GateType::RX: apply_single_qubit_matrix(op.qubits[0], RX(op.params[0])); break;
         case GateType::RY: apply_single_qubit_matrix(op.qubits[0], RY(op.params[0])); break;

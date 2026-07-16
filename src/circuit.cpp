@@ -10,13 +10,13 @@ Circuit::Circuit(std::size_t num_qubits) : num_qubits_(num_qubits) {
 }
 
 Circuit& Circuit::add_gate(GateType type, std::vector<std::size_t> qubits,
-                            std::vector<double> params, std::string label) {
+                            std::vector<double> params, std::string label, bool dagger) {
     for (auto q : qubits) {
         if (q >= num_qubits_) {
             throw std::out_of_range("Qubit index out of range for this circuit");
         }
     }
-    ops_.push_back(GateOp{type, std::move(qubits), std::move(params), std::move(label)});
+    ops_.push_back(GateOp{type, std::move(qubits), std::move(params), std::move(label), dagger});
     return *this;
 }
 
@@ -24,8 +24,10 @@ Circuit& Circuit::h(std::size_t qubit)  { return add_gate(GateType::H, {qubit}, 
 Circuit& Circuit::x(std::size_t qubit)  { return add_gate(GateType::X, {qubit}, {}, "X"); }
 Circuit& Circuit::y(std::size_t qubit)  { return add_gate(GateType::Y, {qubit}, {}, "Y"); }
 Circuit& Circuit::z(std::size_t qubit)  { return add_gate(GateType::Z, {qubit}, {}, "Z"); }
-Circuit& Circuit::s(std::size_t qubit)  { return add_gate(GateType::S, {qubit}, {}, "S"); }
-Circuit& Circuit::t(std::size_t qubit)  { return add_gate(GateType::T, {qubit}, {}, "T"); }
+Circuit& Circuit::s(std::size_t qubit)  { return add_gate(GateType::S, {qubit}, {}, "S", false); }
+Circuit& Circuit::sdg(std::size_t qubit) { return add_gate(GateType::S, {qubit}, {}, "S†", true); }
+Circuit& Circuit::t(std::size_t qubit)  { return add_gate(GateType::T, {qubit}, {}, "T", false); }
+Circuit& Circuit::tdg(std::size_t qubit) { return add_gate(GateType::T, {qubit}, {}, "T†", true); }
 
 Circuit& Circuit::u(std::size_t qubit, double theta, double phi, double lambda) {
     return add_gate(GateType::U, {qubit}, {theta, phi, lambda}, "U");

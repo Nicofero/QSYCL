@@ -44,7 +44,6 @@ struct Complex {
 enum class GateType {
     H, X, Y, Z, S, T, U,
     RX, RY, RZ,
-    CONTROL, DAGGER,
     CNOT, CZ, SWAP, CRX, CRY, CRZ,
     MEASURE
 };
@@ -56,6 +55,7 @@ struct GateOp {
     std::vector<std::size_t> qubits;
     std::vector<double> params;
     std::string label; // optional, for debugging/printing circuits
+    bool dagger = false; // optional, for controlled/daggered gates
 };
 
 // 2x2 unitary, row-major: [m00, m01, m10, m11]

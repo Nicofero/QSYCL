@@ -19,8 +19,10 @@ public:
     Circuit& y(std::size_t qubit);
     Circuit& z(std::size_t qubit);
     Circuit& s(std::size_t qubit);
+    Circuit& sdg(std::size_t qubit);
     Circuit& t(std::size_t qubit);
-    
+    Circuit& tdg(std::size_t qubit);
+
     // --- Universal single-qubit gate ---
     Circuit& u(std::size_t qubit, double theta, double phi, double lambda);
 
@@ -50,7 +52,7 @@ public:
 
 private:
     Circuit& add_gate(GateType type, std::vector<std::size_t> qubits,
-                       std::vector<double> params = {}, std::string label = "");
+                       std::vector<double> params = {}, std::string label = "", bool dagger = false);
 
     std::size_t num_qubits_;
     std::vector<GateOp> ops_;

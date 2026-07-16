@@ -17,8 +17,12 @@ inline Matrix2x2 X() { return {Complex(0), Complex(1), Complex(1), Complex(0)}; 
 inline Matrix2x2 Y() { return {Complex(0), Complex(0, -1), Complex(0, 1), Complex(0)}; }
 inline Matrix2x2 Z() { return {Complex(1), Complex(0), Complex(0), Complex(-1)}; }
 inline Matrix2x2 S() { return {Complex(1), Complex(0), Complex(0), Complex(0, 1)}; }
+inline Matrix2x2 Sdg() { return {Complex(1), Complex(0), Complex(0), Complex(0, -1)}; }
 inline Matrix2x2 T() {
     return {Complex(1), Complex(0), Complex(0), Complex(std::cos(M_PI / 4), std::sin(M_PI / 4))};
+}
+inline Matrix2x2 Tdg() {
+    return {Complex(1), Complex(0), Complex(0), Complex(std::cos(-M_PI / 4), std::sin(-M_PI / 4))};
 }
 
 inline Matrix2x2 U(double theta, double phi, double lambda) {
