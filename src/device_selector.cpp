@@ -22,6 +22,9 @@ sycl::queue DeviceSelector::make_queue(DeviceType type) {
                         d.get_info<sycl::info::device::name>().find("Emulation") != std::string::npos)
                        ? 1 : -1;
             });
+        
+        case DeviceType::CUNQA:
+            return sycl::queue(sycl::cpu_selector_v);
         case DeviceType::CUSTOM:
             return sycl::queue(sycl::cpu_selector_v); // current idea, CUSTOM device represents CUNQA backend, which is CPU-based for now. This may change in the future.
     }

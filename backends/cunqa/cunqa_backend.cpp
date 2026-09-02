@@ -1,154 +1,338 @@
-#include "cunqa_backend.hpp"
-#include "quantum/gates.hpp"
-#include "quantum/device_selector.hpp"
-#include <stdexcept>
-#include <algorithm>
-#include <numeric>
+#include "backends/cunqa/cunqa_backend.hpp"
 
-namespace quantum::backends {
+#include <zmq.hpp>
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+
+// ---------------------------------------------------------------------
+// Everything in this file talks to cunqa purely through its on-disk
+// registry (qpus.json) and its ZMQ wire protocol -- reverse-engineered
+// from cunqa's Python layer (cunqa/qpu.py, cunqa/qjob.py, cunqa/result.py)
+// and its ZMQ client (src/comm/comm_impl/zmq/zmq_client.cpp), not from a
+// linked cunqa library. None of this is a documented/public interface,
+// so re-verify against your cunqa version if anything looks wrong --
+// especially the bit-order note in run_on_cunqa() below, which is the
+// one detail we couldn't confirm from source alone.
+// ---------------------------------------------------------------------
+
+namespace quantum {
+
+using json = nlohmann::json;
+
+namespace {
+
+std::string cunqa_registry_path() {
+    const char* store = std::getenv("STORE");
+    if (!store) {
+        throw std::runtime_error(
+            "CUNQABackend: $STORE is not set, cannot locate "
+            "$STORE/.cunqa/qpus.json");
+    }
+    return std::string(store) + "/.cunqa/qpus.json";
+}
+
+// One entry from qpus.json that we care about.
+struct QpuRegistryEntry {
+    std::string id;
+    std::string endpoint;
+    json device;             // net.device -- passed back verbatim in config.device
+    std::size_t max_qubits;  // backend.num_qubits[0], data qubits only
+};
+
+// Mirrors cunqa.qpu.get_QPUs(co_located=True): filters qpus.json by
+// net.mode == "co_located" or net.nodename == $SLURMD_NODENAME.
+std::vector<QpuRegistryEntry> discover_co_located_qpus() {
+    std::ifstream file(cunqa_registry_path());
+    if (!file) {
+        return {};
+    }
+    json registry;
+    file >> registry;
+
+    const char* local_node = std::getenv("SLURMD_NODENAME");
+
+    std::vector<QpuRegistryEntry> found;
+    for (auto& [id, info] : registry.items()) {
+        const auto& net = info.at("net");
+        std::string mode = net.value("mode", "");
+        std::string nodename = net.value("nodename", "");
+        bool co_located = (mode == "co_located") ||
+            (local_node != nullptr && nodename == local_node);
+        if (!co_located) continue;
+
+        QpuRegistryEntry entry;
+        entry.id = id;
+        entry.endpoint = net.at("endpoint").get<std::string>();
+        entry.device = net.at("device");
+        entry.max_qubits = info.at("backend").at("num_qubits")[0].get<std::size_t>();
+        found.push_back(std::move(entry));
+    }
+    return found;
+}
+
+std::string generate_circuit_id() {
+    static std::atomic<std::uint64_t> counter{0};
+    std::ostringstream oss;
+    oss << "sycl_cunqa_" << counter.fetch_add(1);
+    return oss.str();
+}
+
+// Translates one GateOp into cunqa's instruction JSON.
+// ASSUMED: GateOp has .name (string), .qubits (vector<size_t>), and
+// .params (vector<double>) -- rename to match quantum/types.hpp.
+// Gate lists below are NOT exhaustive of what cunqa's CunqaCircuit
+// supports (it has many more, see cunqa/circuit/core.py) -- extend as
+// your GateOp set grows.
+json gate_to_instruction(const GateOp& op) {
+    static const std::vector<std::string> single_qubit_no_param = {
+        "id", "x", "y", "z", "h", "s", "sdg", "sx", "sxdg", "t", "tdg"
+    };
+    static const std::vector<std::string> two_qubit_no_param = {
+        "cx", "cy", "cz", "swap", "ch"
+    };
+    static const std::vector<std::string> single_qubit_one_param = {
+        "rx", "ry", "rz", "p", "u1"
+    };
+
+    auto contains = [](const std::vector<std::string>& v, const std::string& s) {
+        return std::find(v.begin(), v.end(), s) != v.end();
+    };
+
+    json instr;
+    instr["name"] = op.name;
+
+    if (contains(single_qubit_no_param, op.name)) {
+        instr["qubits"] = op.qubits.at(0);
+    } else if (contains(two_qubit_no_param, op.name)) {
+        instr["qubits"] = op.qubits; // [control, target]
+    } else if (contains(single_qubit_one_param, op.name)) {
+        instr["qubits"] = op.qubits.at(0);
+        instr["params"] = op.params; // e.g. [theta]
+    } else {
+        throw std::runtime_error(
+            "CUNQABackend: gate '" + op.name +
+            "' has no known cunqa translation -- extend gate_to_instruction()");
+    }
+    return instr;
+}
+
+} // namespace
+
+struct CUNQABackend::QpuHandle {
+    QpuRegistryEntry entry;
+    zmq::context_t context{1};
+    zmq::socket_t socket{context, zmq::socket_type::dealer};
+
+    explicit QpuHandle(QpuRegistryEntry e) : entry(std::move(e)) {
+        socket.connect(entry.endpoint);
+    }
+};
 
 CUNQABackend::CUNQABackend()
-    : queue_(DeviceSelector::make_queue(DeviceType::CPU)) {}
+    : fallback_(std::make_unique<CPUBackend>()) {
+    discover_qpu();
+}
+
+CUNQABackend::~CUNQABackend() = default;
+
+void CUNQABackend::discover_qpu() {
+    try {
+        auto candidates = discover_co_located_qpus();
+        if (candidates.empty()) {
+            using_cunqa_ = false;
+            qpu_.reset();
+            std::cerr << "[CUNQABackend] no qraised QPU found in "
+                      << cunqa_registry_path()
+                      << ", falling back to CPU backend\n";
+            return;
+        }
+        // ASSUMED: taking the first co-located match is good enough --
+        // add real selection logic (least loaded, matching family, etc.)
+        // once you have more than one raised vQPU to choose between.
+        qpu_ = std::make_unique<QpuHandle>(candidates.front());
+        using_cunqa_ = true;
+    } catch (const std::exception& e) {
+        using_cunqa_ = false;
+        qpu_.reset();
+        std::cerr << "[CUNQABackend] QPU discovery failed (" << e.what()
+                  << "), falling back to CPU backend\n";
+    }
+}
 
 void CUNQABackend::initialize(std::size_t num_qubits) {
-    if (num_qubits == 0 || num_qubits > 30) {
-        throw std::invalid_argument("CUNQABackend: num_qubits must be in [1, 30] for this reference implementation");
-    }
     num_qubits_ = num_qubits;
-    std::size_t dim = std::size_t(1) << num_qubits;
-    state_.assign(dim, Complex(0.0, 0.0));
-    state_[0] = Complex(1.0, 0.0);
-}
-
-void CUNQABackend::apply_single_qubit_matrix(std::size_t qubit, const Matrix2x2& m) {
-    std::size_t dim = state_.size();
-    std::size_t mask = std::size_t(1) << qubit;
-
-    sycl::buffer<Complex, 1> buf(state_.data(), sycl::range<1>(dim));
-    queue_.submit([&](sycl::handler& h) {
-        auto acc = buf.get_access<sycl::access::mode::read_write>(h);
-        Matrix2x2 mat = m; // captured by value, kernel-safe
-        h.parallel_for(sycl::range<1>(dim / 2), [=](sycl::id<1> idx) {
-            std::size_t i = idx[0];
-            std::size_t low = i & (mask - 1);
-            std::size_t high = i & ~(mask - 1);
-            std::size_t i0 = (high << 1) | low;
-            std::size_t i1 = i0 | mask;
-
-            Complex a0 = acc[i0];
-            Complex a1 = acc[i1];
-            acc[i0] = mat[0] * a0 + mat[1] * a1;
-            acc[i1] = mat[2] * a0 + mat[3] * a1;
-        });
-    }).wait();
-}
-
-void CUNQABackend::apply_controlled_matrix(std::size_t control, std::size_t target, const Matrix2x2& m) {
-    std::size_t dim = state_.size();
-    std::size_t mask_t = std::size_t(1) << target;
-    std::size_t mask_c = std::size_t(1) << control;
-
-    sycl::buffer<Complex, 1> buf(state_.data(), sycl::range<1>(dim));
-    queue_.submit([&](sycl::handler& h) {
-        auto acc = buf.get_access<sycl::access::mode::read_write>(h);
-        Matrix2x2 mat = m;
-        h.parallel_for(sycl::range<1>(dim / 2), [=](sycl::id<1> idx) {
-            std::size_t i = idx[0];
-            std::size_t low = i & (mask_t - 1);
-            std::size_t high = i & ~(mask_t - 1);
-            std::size_t i0 = (high << 1) | low;
-            std::size_t i1 = i0 | mask_t;
-
-            if (i0 & mask_c) { // control bit is identical on i0 and i1
-                Complex a0 = acc[i0];
-                Complex a1 = acc[i1];
-                acc[i0] = mat[0] * a0 + mat[1] * a1;
-                acc[i1] = mat[2] * a0 + mat[3] * a1;
-            }
-        });
-    }).wait();
-}
-
-void CUNQABackend::apply_swap_gate(std::size_t qubit_a, std::size_t qubit_b) {
-    std::size_t dim = state_.size();
-    std::size_t mask_a = std::size_t(1) << qubit_a;
-    std::size_t mask_b = std::size_t(1) << qubit_b;
-
-    sycl::buffer<Complex, 1> buf(state_.data(), sycl::range<1>(dim));
-    queue_.submit([&](sycl::handler& h) {
-        auto acc = buf.get_access<sycl::access::mode::read_write>(h);
-        h.parallel_for(sycl::range<1>(dim), [=](sycl::id<1> idx) {
-            std::size_t i = idx[0];
-            if ((i & mask_a) == 0 && (i & mask_b) != 0) {
-                std::size_t j = (i | mask_a) & ~mask_b;
-                Complex tmp = acc[i];
-                acc[i] = acc[j];
-                acc[j] = tmp;
-            }
-        });
-    }).wait();
+    gate_buffer_.clear();
+    // Deliberately not re-running discover_qpu() here -- circuit-buffer
+    // lifecycle and QPU discovery are on separate cadences (see header).
+    if (!using_cunqa_) {
+        fallback_->initialize(num_qubits);
+    } else if (qpu_ && num_qubits > qpu_->entry.max_qubits) {
+        throw std::runtime_error(
+            "CUNQABackend: circuit needs " + std::to_string(num_qubits) +
+            " qubits but the discovered vQPU only supports " +
+            std::to_string(qpu_->entry.max_qubits));
+    }
 }
 
 void CUNQABackend::apply_gate(const GateOp& op) {
-    using namespace quantum::gates;
-    switch (op.type) {
-        case GateType::H:  apply_single_qubit_matrix(op.qubits[0], H()); break;
-        case GateType::X:  apply_single_qubit_matrix(op.qubits[0], X()); break;
-        case GateType::Y:  apply_single_qubit_matrix(op.qubits[0], Y()); break;
-        case GateType::Z:  apply_single_qubit_matrix(op.qubits[0], Z()); break;
-        case GateType::S:  if (op.dagger) apply_single_qubit_matrix(op.qubits[0], Sdg());
-                           else apply_single_qubit_matrix(op.qubits[0], S()); break;
-        case GateType::T:  if (op.dagger) apply_single_qubit_matrix(op.qubits[0], Tdg());
-                           else apply_single_qubit_matrix(op.qubits[0], T()); break;
-        case GateType::U:  apply_single_qubit_matrix(op.qubits[0], U(op.params[0], op.params[1], op.params[2])); break;
-        case GateType::RX: apply_single_qubit_matrix(op.qubits[0], RX(op.params[0])); break;
-        case GateType::RY: apply_single_qubit_matrix(op.qubits[0], RY(op.params[0])); break;
-        case GateType::RZ: apply_single_qubit_matrix(op.qubits[0], RZ(op.params[0])); break;
-        case GateType::CNOT: apply_controlled_matrix(op.qubits[0], op.qubits[1], X()); break;
-        case GateType::CZ:   apply_controlled_matrix(op.qubits[0], op.qubits[1], Z()); break;
-        case GateType::CRX:  apply_controlled_matrix(op.qubits[0], op.qubits[1], RX(op.params[0])); break;
-        case GateType::CRY:  apply_controlled_matrix(op.qubits[0], op.qubits[1], RY(op.params[0])); break;
-        case GateType::CRZ:  apply_controlled_matrix(op.qubits[0], op.qubits[1], RZ(op.params[0])); break;
-        case GateType::SWAP: apply_swap_gate(op.qubits[0], op.qubits[1]); break;
-        case GateType::MEASURE: break;
+    if (!using_cunqa_) {
+        fallback_->apply_gate(op);
+        return;
     }
+    gate_buffer_.push_back(op); // buffered, not executed -- see header
 }
 
 std::vector<Complex> CUNQABackend::get_state() const {
-    return state_;
+    if (!using_cunqa_) {
+        return fallback_->get_state();
+    }
+    throw std::runtime_error(
+        "CUNQABackend::get_state() is not supported on a real vQPU: "
+        "cunqa emulates real QPU behavior, and real QPUs cannot report "
+        "exact statevector amplitudes. Use sample() instead.");
 }
 
 std::vector<double> CUNQABackend::probabilities() const {
-    std::vector<double> probs(state_.size());
-    for (std::size_t i = 0; i < state_.size(); ++i) probs[i] = state_[i].norm();
-    return probs;
+    if (!using_cunqa_) {
+        return fallback_->probabilities();
+    }
+    throw std::runtime_error(
+        "CUNQABackend::probabilities() is not supported on a real vQPU: "
+        "cunqa emulates real QPU behavior, and real QPUs cannot report "
+        "exact probabilities. Use sample() instead.");
 }
 
 std::vector<unsigned long long> CUNQABackend::sample(
     const std::vector<std::size_t>& qubits, std::size_t shots) {
-    auto probs = probabilities();
-    std::discrete_distribution<std::size_t> dist(probs.begin(), probs.end());
-
-    std::vector<unsigned long long> results;
-    results.reserve(shots);
-
-    std::vector<std::size_t> which = qubits.empty()
-        ? [&] { std::vector<std::size_t> all(num_qubits_); std::iota(all.begin(), all.end(), 0); return all; }()
-        : qubits;
-
-    for (std::size_t s = 0; s < shots; ++s) {
-        std::size_t full_index = dist(rng_);
-        unsigned long long readout = 0;
-        for (std::size_t k = 0; k < which.size(); ++k) {
-            if (full_index & (std::size_t(1) << which[k])) readout |= (1ULL << k);
-        }
-        results.push_back(readout);
+    if (!using_cunqa_) {
+        return fallback_->sample(qubits, shots);
     }
-    return results;
+
+    SampleResult result;
+    try {
+        result = run_on_cunqa(qubits, shots);
+    } catch (const std::exception& e) {
+        // Submission failed at run time -- e.g. the qraised allocation's
+        // time box expired mid-session. Re-probe once, then fall back
+        // if the QPU is really gone, replaying the buffered circuit.
+        std::cerr << "[CUNQABackend] cunqa submission failed (" << e.what()
+                  << "), re-checking QPU availability\n";
+        discover_qpu();
+        if (!using_cunqa_) {
+            fallback_->initialize(num_qubits_);
+            for (const auto& op : gate_buffer_) {
+                fallback_->apply_gate(op);
+            }
+            return fallback_->sample(qubits, shots);
+        }
+        result = run_on_cunqa(qubits, shots);
+    }
+    return result.outcomes;
+}
+
+CUNQABackend::SampleResult CUNQABackend::run_on_cunqa(
+    const std::vector<std::size_t>& qubits, std::size_t shots) {
+
+    std::vector<std::size_t> measured = qubits;
+    if (measured.empty()) {
+        measured.resize(num_qubits_);
+        for (std::size_t i = 0; i < num_qubits_; ++i) measured[i] = i;
+    }
+
+    // Build instructions: buffered gates, then one explicit measure per
+    // requested qubit -- cunqa's CunqaCircuit::measure(qubit, clbit)
+    // supports arbitrary subsets directly, so no marginalization needed.
+    json instructions = json::array();
+    for (const auto& op : gate_buffer_) {
+        instructions.push_back(gate_to_instruction(op));
+    }
+    for (std::size_t clbit = 0; clbit < measured.size(); ++clbit) {
+        instructions.push_back({
+            {"name", "measure"},
+            {"qubits", measured[clbit]},
+            {"clbits", clbit},
+            {"save", true}
+        });
+    }
+
+    json task;
+    task["config"] = {
+        {"shots", shots},
+        {"method", "automatic"},
+        {"avoid_parallelization", false},
+        {"num_clbits", measured.size()},
+        {"num_qubits", {num_qubits_, 0}},
+        {"device", qpu_->entry.device},
+        {"sending_to", json::array()},
+        {"is_dynamic", false},
+        {"qpu_id", qpu_->entry.id}
+    };
+    task["instructions"] = instructions;
+    task["id"] = generate_circuit_id();
+
+    const std::string task_str = task.dump();
+    zmq::message_t request(task_str.begin(), task_str.end());
+    qpu_->socket.send(request, zmq::send_flags::none);
+
+    zmq::message_t reply;
+    auto recv_size = qpu_->socket.recv(reply, zmq::recv_flags::none);
+    if (!recv_size) {
+        throw std::runtime_error("CUNQABackend: no reply received from vQPU");
+    }
+    std::string response_str(static_cast<char*>(reply.data()), recv_size.value());
+    json response = json::parse(response_str);
+
+    if (response.contains("ERROR")) {
+        throw std::runtime_error(
+            "CUNQABackend: vQPU reported an error: " +
+            response.at("ERROR").get<std::string>());
+    }
+
+    // Aer nests counts under results[0].data.counts; cunqa/Munich-style
+    // simulators put counts directly at the top level (mirrors
+    // cunqa.result.Result.counts's own branching logic).
+    json counts_json;
+    if (response.contains("results")) {
+        counts_json = response.at("results").at(0).at("data").at("counts");
+    } else if (response.contains("counts")) {
+        counts_json = response.at("counts");
+    } else {
+        throw std::runtime_error(
+            "CUNQABackend: unrecognized result format from vQPU (no "
+            "'results' or 'counts' key)");
+    }
+
+    // NOTE ON BIT ORDER -- NOT verified against a running vQPU, only
+    // inferred (Aer/Qiskit convention: rightmost bitstring character is
+    // clbit 0, i.e. the clbit assigned to measured[0] above). Sanity
+    // check this once against a known asymmetric circuit -- e.g. apply
+    // x only to measured[0], measure everything, and confirm the "1"
+    // lands on the expected side of the bitstring -- before trusting
+    // sample() output for anything real.
+    SampleResult out;
+    out.outcomes.reserve(shots);
+    for (auto& [bitstring, count] : counts_json.items()) {
+        unsigned long long value = std::stoull(bitstring, nullptr, 2);
+        std::size_t n = count.get<std::size_t>();
+        for (std::size_t i = 0; i < n; ++i) {
+            out.outcomes.push_back(value);
+        }
+    }
+    return out;
 }
 
 std::string CUNQABackend::device_name() const {
-    return "CUNQA (SYCL: " + queue_.get_device().get_info<sycl::info::device::name>() + ")";
+    if (using_cunqa_) {
+        return "CUNQA (vQPU: " + qpu_->entry.id + ")";
+    }
+    return "CUNQA (fallback: " + fallback_->device_name() + ")";
 }
 
-} // namespace quantum::backends
+} // namespace quantum

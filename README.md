@@ -27,7 +27,7 @@ Requires the Intel oneAPI DPC++/C++ Compiler (`icpx`), which provides SYCL.
 
 ```bash
 source /opt/intel/oneapi/setvars.sh   # sets up icpx on PATH
-cmake -B build -DCMAKE_CXX_COMPILER=icpx
+cmake -B build -DCMAKE_CXX_COMPILER= # -DENABLE_GPU_BACKEND=ON -DENABLE_CUNQA_BACKEND=ON
 cmake --build build
 ./build/bell_state
 ```

@@ -13,7 +13,7 @@ int main() {
 
     // 2. Pick a device and get a runtime for it. Swapping DeviceType::CPU
     //    for DeviceType::GPU (once implemented) is the only line that changes.
-    QuantumRuntime runtime(DeviceType::CUSTOM);
+    QuantumRuntime runtime(DeviceType::CUNQA);
 
     std::cout << "Running on: " << runtime.device_name() << "\n\n";
 

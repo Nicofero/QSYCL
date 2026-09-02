@@ -26,12 +26,14 @@ std::unique_ptr<Backend> BackendFactory::create(DeviceType type) {
         case DeviceType::FPGA:
         case DeviceType::FPGA_EMULATOR:
             throw std::runtime_error("FPGA backend not implemented yet.");
-        case DeviceType::CUSTOM:
+        case DeviceType::CUNQA:
             #ifdef QUANTUM_ENABLE_CUNQA
                 return std::make_unique<backends::CUNQABackend>();
             #else
                 throw std::runtime_error("CUNQA backend was not built.");
             #endif
+        case DeviceType::CUSTOM:
+            throw std::runtime_error("CUSTOM backend not implemented yet.");
     }
     throw std::runtime_error("Unknown DeviceType");
 }

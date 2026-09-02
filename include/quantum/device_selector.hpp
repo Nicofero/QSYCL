@@ -11,6 +11,7 @@ enum class DeviceType {
     GPU,
     FPGA,
     FPGA_EMULATOR,
+    CUNQA,
     CUSTOM
 };
 
