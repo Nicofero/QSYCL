@@ -1,13 +1,14 @@
 #pragma once
 
 #include "quantum/backend.hpp"
-#include "backends/cpu/cpu_backend.hpp"
+#include "cpu_backend.hpp"
 
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace quantum {
+namespace backends {
 
 // CUNQABackend talks directly to an already-qraised cunqa vQPU over its
 // ZeroMQ wire protocol (a DEALER socket, one JSON message per circuit,
@@ -75,4 +76,5 @@ private:
     std::unique_ptr<Backend> fallback_;
 };
 
+} // namespace backends
 } // namespace quantum

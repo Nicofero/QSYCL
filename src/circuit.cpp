@@ -45,7 +45,7 @@ Circuit& Circuit::rz(std::size_t qubit, double theta) {
 
 Circuit& Circuit::cnot(std::size_t control, std::size_t target) {
     if (control == target) throw std::invalid_argument("CNOT control and target must differ");
-    return add_gate(GateType::CNOT, {control, target}, {}, "CNOT");
+    return add_gate(GateType::CNOT, {control, target}, {}, "CX");
 }
 Circuit& Circuit::cz(std::size_t control, std::size_t target) {
     if (control == target) throw std::invalid_argument("CZ control and target must differ");

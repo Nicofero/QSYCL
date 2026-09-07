@@ -1,10 +1,11 @@
-#include "backends/cunqa/cunqa_backend.hpp"
+#include "cunqa_backend.hpp"
 
 #include <zmq.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -23,6 +24,7 @@
 // ---------------------------------------------------------------------
 
 namespace quantum {
+namespace backends {
 
 using json = nlohmann::json;
 
@@ -43,7 +45,7 @@ struct QpuRegistryEntry {
     std::string id;
     std::string endpoint;
     json device;             // net.device -- passed back verbatim in config.device
-    std::size_t max_qubits;  // backend.num_qubits[0], data qubits only
+    std::size_t max_qubits;  // backend.n_qubits
 };
 
 // Mirrors cunqa.qpu.get_QPUs(co_located=True): filters qpus.json by
@@ -71,7 +73,7 @@ std::vector<QpuRegistryEntry> discover_co_located_qpus() {
         entry.id = id;
         entry.endpoint = net.at("endpoint").get<std::string>();
         entry.device = net.at("device");
-        entry.max_qubits = info.at("backend").at("num_qubits")[0].get<std::size_t>();
+        entry.max_qubits = info.at("backend").at("n_qubits").get<std::size_t>();
         found.push_back(std::move(entry));
     }
     return found;
@@ -85,8 +87,10 @@ std::string generate_circuit_id() {
 }
 
 // Translates one GateOp into cunqa's instruction JSON.
-// ASSUMED: GateOp has .name (string), .qubits (vector<size_t>), and
-// .params (vector<double>) -- rename to match quantum/types.hpp.
+// ASSUMED: GateOp has .label (string), .qubits (vector<size_t>), and
+// .params (vector<double>) -- rename further if these don't match
+// quantum/types.hpp. Gate names are matched case-insensitively (label
+// is lowercased before comparison/serialization).
 // Gate lists below are NOT exhaustive of what cunqa's CunqaCircuit
 // supports (it has many more, see cunqa/circuit/core.py) -- extend as
 // your GateOp set grows.
@@ -106,18 +110,21 @@ json gate_to_instruction(const GateOp& op) {
     };
 
     json instr;
-    instr["name"] = op.name;
+    std::string label = op.label;
+    std::transform(label.begin(), label.end(), label.begin(),
+               [](unsigned char c) { return std::tolower(c); });
+    instr["name"] = label;
 
-    if (contains(single_qubit_no_param, op.name)) {
-        instr["qubits"] = op.qubits.at(0);
-    } else if (contains(two_qubit_no_param, op.name)) {
+    if (contains(single_qubit_no_param, label)) {
+        instr["qubits"] = op.qubits;
+    } else if (contains(two_qubit_no_param, label)) {
         instr["qubits"] = op.qubits; // [control, target]
-    } else if (contains(single_qubit_one_param, op.name)) {
-        instr["qubits"] = op.qubits.at(0);
+    } else if (contains(single_qubit_one_param, label)) {
+        instr["qubits"] = op.qubits;
         instr["params"] = op.params; // e.g. [theta]
     } else {
         throw std::runtime_error(
-            "CUNQABackend: gate '" + op.name +
+            "CUNQABackend: gate '" + op.label +
             "' has no known cunqa translation -- extend gate_to_instruction()");
     }
     return instr;
@@ -249,6 +256,8 @@ CUNQABackend::SampleResult CUNQABackend::run_on_cunqa(
     // Build instructions: buffered gates, then one explicit measure per
     // requested qubit -- cunqa's CunqaCircuit::measure(qubit, clbit)
     // supports arbitrary subsets directly, so no marginalization needed.
+    // CONFIRMED against a real client dump: "qubits"/"clbits" are
+    // single-element arrays here too, and there's no "save" key.
     json instructions = json::array();
     for (const auto& op : gate_buffer_) {
         instructions.push_back(gate_to_instruction(op));
@@ -256,28 +265,37 @@ CUNQABackend::SampleResult CUNQABackend::run_on_cunqa(
     for (std::size_t clbit = 0; clbit < measured.size(); ++clbit) {
         instructions.push_back({
             {"name", "measure"},
-            {"qubits", measured[clbit]},
-            {"clbits", clbit},
-            {"save", true}
+            {"qubits", json::array({measured[clbit]})},
+            {"clbits", json::array({clbit})}
         });
     }
 
+    // CONFIRMED structure against a real client dump: "sending_to",
+    // "is_dynamic" and "id" are top-level siblings of "config" and
+    // "instructions", NOT nested inside "config" -- and there is no
+    // "qpu_id" field at all (this deployment's no_comm backend doesn't
+    // need it; the ZMQ endpoint alone identifies the target vQPU).
+    // "num_qubits" is a plain scalar (total qubit count), not the
+    // [data, comm] pair the main-branch source suggested.
     json task;
     task["config"] = {
         {"shots", shots},
         {"method", "automatic"},
         {"avoid_parallelization", false},
         {"num_clbits", measured.size()},
-        {"num_qubits", {num_qubits_, 0}},
-        {"device", qpu_->entry.device},
-        {"sending_to", json::array()},
-        {"is_dynamic", false},
-        {"qpu_id", qpu_->entry.id}
+        {"num_qubits", num_qubits_},
+        {"device", qpu_->entry.device}
     };
     task["instructions"] = instructions;
+    task["sending_to"] = json::array();
+    task["is_dynamic"] = false;
     task["id"] = generate_circuit_id();
 
     const std::string task_str = task.dump();
+    // TEMPORARY: dump the exact outgoing payload so a server-side parse
+    // error can be matched against a real field instead of guessed at.
+    // Remove once the schema mismatch is found.
+    // std::cerr << "[CUNQABackend] submitting task:\n" << task.dump(2) << "\n";
     zmq::message_t request(task_str.begin(), task_str.end());
     qpu_->socket.send(request, zmq::send_flags::none);
 
@@ -335,4 +353,5 @@ std::string CUNQABackend::device_name() const {
     return "CUNQA (fallback: " + fallback_->device_name() + ")";
 }
 
+} // namespace backends
 } // namespace quantum
