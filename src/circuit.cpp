@@ -25,9 +25,9 @@ Circuit& Circuit::x(std::size_t qubit)  { return add_gate(GateType::X, {qubit}, 
 Circuit& Circuit::y(std::size_t qubit)  { return add_gate(GateType::Y, {qubit}, {}, "Y"); }
 Circuit& Circuit::z(std::size_t qubit)  { return add_gate(GateType::Z, {qubit}, {}, "Z"); }
 Circuit& Circuit::s(std::size_t qubit)  { return add_gate(GateType::S, {qubit}, {}, "S", false); }
-Circuit& Circuit::sdg(std::size_t qubit) { return add_gate(GateType::S, {qubit}, {}, "S†", true); }
+Circuit& Circuit::sdg(std::size_t qubit) { return add_gate(GateType::S, {qubit}, {}, "SDG", true); }
 Circuit& Circuit::t(std::size_t qubit)  { return add_gate(GateType::T, {qubit}, {}, "T", false); }
-Circuit& Circuit::tdg(std::size_t qubit) { return add_gate(GateType::T, {qubit}, {}, "T†", true); }
+Circuit& Circuit::tdg(std::size_t qubit) { return add_gate(GateType::T, {qubit}, {}, "TDG", true); }
 
 Circuit& Circuit::u(std::size_t qubit, double theta, double phi, double lambda) {
     return add_gate(GateType::U, {qubit}, {theta, phi, lambda}, "U");

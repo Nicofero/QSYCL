@@ -27,7 +27,7 @@ Requires the Intel oneAPI DPC++/C++ Compiler (`icpx`), which provides SYCL.
 
 ```bash
 source /opt/intel/oneapi/setvars.sh   # sets up icpx on PATH
-cmake -B build -DCMAKE_CXX_COMPILER= # -DENABLE_GPU_BACKEND=ON -DENABLE_CUNQA_BACKEND=ON
+cmake -B build -DCMAKE_CXX_COMPILER=ICPX # -DENABLE_GPU_BACKEND=ON -DENABLE_CUNQA_BACKEND=ON
 cmake --build build
 ./build/bell_state
 ```
@@ -46,7 +46,9 @@ implementation's equivalents.
 using namespace quantum;
 
 Circuit bell(2);
-bell.h(0).cnot(0, 1);
+bell.h(0).cnot(0, 1);   // or bell.h(0); bell.cnot(0,1);
+
+
 
 QuantumRuntime runtime(DeviceType::CPU);
 runtime.run(bell);
