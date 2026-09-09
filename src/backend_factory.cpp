@@ -9,6 +9,10 @@
 #include "../backends/cunqa/cunqa_backend.hpp"
 #endif
 
+#ifdef QUANTUM_ENABLE_QPU
+#include "../backends/qpu/qpu_backend.hpp"
+#endif
+
 #include <stdexcept>
 
 namespace quantum {
@@ -31,6 +35,12 @@ std::unique_ptr<Backend> BackendFactory::create(DeviceType type) {
                 return std::make_unique<backends::CUNQABackend>();
             #else
                 throw std::runtime_error("CUNQA backend was not built.");
+            #endif
+        case DeviceType::QPU:
+            #ifdef QUANTUM_ENABLE_QPU
+                return std::make_unique<backends::QPUBackend>();
+            #else
+                throw std::runtime_error("QPU backend was not built.");
             #endif
         case DeviceType::CUSTOM:
             throw std::runtime_error("CUSTOM backend not implemented yet.");

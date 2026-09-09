@@ -24,9 +24,11 @@ sycl::queue DeviceSelector::make_queue(DeviceType type) {
             });
         
         case DeviceType::CUNQA:
-            return sycl::queue(sycl::cpu_selector_v);
+            return sycl::queue(sycl::cpu_selector_v);   // CUNQA backend does not use SYCL directly, but we need a queue to satisfy the interface.
+        case DeviceType::QPU:
+            return sycl::queue(sycl::cpu_selector_v);   // QPU backend does not use SYCL directly, but we need a queue to satisfy the interface.
         case DeviceType::CUSTOM:
-            return sycl::queue(sycl::cpu_selector_v); // current idea, CUSTOM device represents CUNQA backend, which is CPU-based for now. This may change in the future.
+            return sycl::queue(sycl::cpu_selector_v);
     }
     throw std::invalid_argument("Unknown DeviceType");
 }

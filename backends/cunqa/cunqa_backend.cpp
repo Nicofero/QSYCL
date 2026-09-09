@@ -324,13 +324,6 @@ CUNQABackend::SampleResult CUNQABackend::run_on_cunqa(
             "'results' or 'counts' key)");
     }
 
-    // NOTE ON BIT ORDER -- NOT verified against a running vQPU, only
-    // inferred (Aer/Qiskit convention: rightmost bitstring character is
-    // clbit 0, i.e. the clbit assigned to measured[0] above). Sanity
-    // check this once against a known asymmetric circuit -- e.g. apply
-    // x only to measured[0], measure everything, and confirm the "1"
-    // lands on the expected side of the bitstring -- before trusting
-    // sample() output for anything real.
     SampleResult out;
     out.outcomes.reserve(shots);
     for (auto& [bitstring, count] : counts_json.items()) {
