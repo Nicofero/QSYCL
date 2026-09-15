@@ -27,6 +27,8 @@ sycl::queue DeviceSelector::make_queue(DeviceType type) {
             return sycl::queue(sycl::cpu_selector_v);   // CUNQA backend does not use SYCL directly, but we need a queue to satisfy the interface.
         case DeviceType::QPU:
             return sycl::queue(sycl::cpu_selector_v);   // QPU backend does not use SYCL directly, but we need a queue to satisfy the interface.
+        case DeviceType::QMIO:
+            return sycl::queue(sycl::cpu_selector_v);   // QPU backend does not use SYCL directly, but we need a queue to satisfy the interface.
         case DeviceType::CUSTOM:
             return sycl::queue(sycl::cpu_selector_v);
     }
@@ -44,6 +46,9 @@ std::string DeviceSelector::to_string(DeviceType type) {
         case DeviceType::GPU: return "GPU";
         case DeviceType::FPGA: return "FPGA";
         case DeviceType::FPGA_EMULATOR: return "FPGA_EMULATOR";
+        case DeviceType::CUNQA: return "CUNQA";
+        case DeviceType::QMIO: return "QMIO";
+        case DeviceType::QPU: return "QPU";
         case DeviceType::CUSTOM: return "CUSTOM";
     }
     return "UNKNOWN";

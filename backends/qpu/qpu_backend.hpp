@@ -1,45 +1,58 @@
 #pragma once
 
 #include "quantum/backend.hpp"
-#include "cpu_backend.hpp"
 
 #include <memory>
-#include <string>
 #include <vector>
 
 namespace quantum {
 namespace backends {
 
-// QPUBackend talks directly to an already-qraised qpu vQPU over its
-// ZeroMQ wire protocol (a DEALER socket, one JSON message per circuit,
-// one JSON message back). It does NOT link against qpu's C++ sources:
-// qpu's own CMake install only exports its CLI tools (qraise/qdrop/
-// qinfo/...) and its Python pybind extension -- none of its internal
-// C++ headers or libraries (comm/client.hpp, sim/backend.hpp, etc.) are
-// installed or exported via find_package(), so there is nothing stable
-// to link against there. Instead this backend:
+// Shared orchestration layer for any backend that delegates circuit
+// execution to a remote QPU -- real hardware or an emulator standing in
+// for one -- rather than computing a state vector locally. This is the
+// "dispatcher" layer: it owns everything that is true of *any* such
+// device, so a concrete backend (QmioBackend, CunqaBackend, a future
+// IBM/IonQ backend, ...) only has to implement the vendor-specific
+// serialization/transport/parsing in submit_circuit().
 //
-//   1. Reads $STORE/.qpu/qpus.json directly -- the same registry file
-//      qpu's own get_QPUs() reads -- to discover an already-raised,
-//      co-located vQPU.
-//   2. Speaks qpu's wire protocol itself via libzmq, reproducing what
-//      qpu.qclient.QClient does, without depending on qpu's build.
-//   3. Builds the same JSON circuit-task schema qpu.qjob.QJob builds.
+// What's shared, and why it belongs here rather than in each backend:
+//   - Gate buffering: no remote QPU executes gates one at a time: a
+//     circuit is always compiled and submitted as a whole unit, so
+//     apply_gate() always just appends to gate_buffer_, and submission
+//     only happens lazily, inside sample().
+//   - get_state()/probabilities() are unsupported whenever a real
+//     device is in use: no real QPU can report exact amplitudes, so
+//     there is nothing vendor-specific to differ here -- every remote
+//     backend should refuse the same way.
+//   - CPU fallback: if no device is available (never discovered, or a
+//     submission fails at run time), every such backend should behave
+//     the same way -- fall back to a local CPUBackend rather than
+//     failing outright, and stay consistent about it (sample() must not
+//     silently answer from a different simulation than probabilities()
+//     would have, which is why get_state()/probabilities() ALSO check
+//     device_available_ rather than always throwing).
+//   - Retry ownership: sample() calls submit_circuit() exactly ONCE per
+//     invocation and never retries it itself. A subclass whose protocol
+//     makes some failures safe to retry (e.g. a connect/send failure)
+//     and others definitely NOT safe to retry (QMIO: a receive failure
+//     *after* a successful send, where the device may already have
+//     executed the request -- a blind resend risks double-executing on
+//     real hardware) must do that retrying internally, inside its own
+//     submit_circuit(), before it ever throws out to this base class.
+//     After a failure, this dispatcher only decides whether to fall
+//     back to `fallback_` (via recheck_device()) or propagate the
+//     error as-is -- it never second-guesses a subclass's own retry
+//     decision by trying again itself.
 //
-// Only depends on libzmq + a JSON library (nlohmann::json here) --
-// both ordinary, independently versioned dependencies, decoupled from
-// qpu's internal source layout and commit history.
-//
-// apply_gate() buffers ops rather than executing them: qpu only runs
-// whole circuits as a unit. The circuit is built and submitted lazily,
-// the first time sample() is called.
-//
-// get_state()/probabilities() are intentionally unsupported when
-// running on a real vQPU (see .cpp for why) and fall through to
-// CPUBackend when no vQPU was found at all.
+// A subclass is responsible for its own device discovery/connection
+// (setting device_available_ from its constructor) and for
+// submit_circuit() -- the only vendor-specific piece of the contract.
 class QPUBackend : public Backend {
 public:
-    QPUBackend();
+    // `fallback` is used whenever no device is available. Ownership is
+    // taken so the fallback's lifetime matches this backend's.
+    explicit QPUBackend(std::unique_ptr<Backend> fallback);
     ~QPUBackend() override;
 
     void initialize(std::size_t num_qubits) override;
@@ -48,31 +61,57 @@ public:
     std::vector<double> probabilities() const override;
     std::vector<unsigned long long> sample(
         const std::vector<std::size_t>& qubits, std::size_t shots) override;
-    std::string device_name() const override;
+    // device_name() is left pure virtual: every backend must say what
+    // it actually is (and, by convention established in CUNQABackend,
+    // reflect fallback state too -- see cunqa_backend.cpp for the
+    // pattern: "<vendor> (fallback: <fallback device_name()>)").
 
-private:
-    struct QpuHandle;   // registry entry + open ZMQ DEALER socket, in the .cpp
-    struct SampleResult { std::vector<unsigned long long> outcomes; };
-
-    // Reads $STORE/.qpu/qpus.json and connects to the first
-    // vQPU found. Sets using_qpu_. Called at construction, and again
-    // -- lazily -- if a submission later fails (e.g. a time-boxed
-    // qraise allocation expired mid-session).
-    void discover_qpu();
-
-    // Flushes gate_buffer_ plus explicit measurements for `qubits`
-    // (all qubits if empty) into qpu's JSON schema, sends it over the
-    // vQPU's ZMQ socket, and blocks for the reply. Throws on failure.
-    SampleResult run_on_qpu(const std::vector<std::size_t>& qubits,
-                               std::size_t shots);
-
+protected:
+    // Set by a subclass's own discovery/connection logic. Read here to
+    // decide whether to delegate to the device or to `fallback_`.
+    bool device_available_ = false;
     std::size_t num_qubits_ = 0;
     std::vector<GateOp> gate_buffer_;
 
-    bool using_qpu_ = false;
-    std::unique_ptr<QpuHandle> qpu_;
+    struct SampleResult {
+        std::vector<unsigned long long> outcomes; // one entry per shot
+    };
 
-    // Used whenever no qraised QPU is found, or a qpu submission fails.
+    // Vendor-specific core: serialize gate_buffer_ plus the qubits to
+    // measure (already resolved to "every qubit" if the caller passed
+    // an empty set -- see sample()) into that device's wire format,
+    // submit it, and return the parsed measurement outcomes. Throw on
+    // any failure (network, protocol, device-reported error) -- but see
+    // the class-level "Retry ownership" note: do any retrying that is
+    // safe for this device's protocol INSIDE this method before
+    // throwing, since sample() will not retry it for you.
+    virtual SampleResult submit_circuit(
+        const std::vector<std::size_t>& qubits, std::size_t shots) = 0;
+
+    // Called by sample() after submit_circuit() throws, to decide
+    // whether the device should now be considered unavailable (causing
+    // sample() to fall back to `fallback_`) or whether the failure
+    // should simply be re-thrown to the caller as a real error.
+    //
+    // Default: no-op, i.e. device_available_ is left unchanged (true),
+    // so by default a submission failure is surfaced as a real
+    // exception rather than silently substituted with a different
+    // simulation -- appropriate for a backend with no meaningful way to
+    // "re-check" a single fixed real device (see QmioBackend, which
+    // deliberately keeps this default: a QMIO run failing should be
+    // visible, never silently answered by a local simulator instead).
+    // A subclass that DOES have a real re-discovery mechanism (e.g.
+    // CUNQA re-probing its vQPU registry, since "no longer found" is a
+    // legitimate, common outcome there) overrides this to flip
+    // device_available_ to false when appropriate.
+    virtual void recheck_device() {}
+
+    // Exposed so a subclass's device_name() can mention the fallback
+    // when device_available_ is false, matching the established
+    // CUNQABackend convention.
+    const Backend& fallback() const { return *fallback_; }
+
+private:
     std::unique_ptr<Backend> fallback_;
 };
 

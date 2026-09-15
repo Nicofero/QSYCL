@@ -12,6 +12,7 @@ enum class DeviceType {
     FPGA,
     FPGA_EMULATOR,
     CUNQA,
+    QMIO,
     QPU,
     CUSTOM
 };

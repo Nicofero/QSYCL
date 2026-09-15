@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(ENABLE_GPU_BACKEND "Build the SYCL GPU backend" OFF)
 option(ENABLE_CUNQA_BACKEND "Build the CUNQA backend" OFF)
+option(ENABLE_QPU_BACKEND "Build the QPU backend" OFF)
 
 
 # This project targets Intel oneAPI DPC++ (icpx). Configure with:
@@ -35,6 +36,10 @@ endif()
 
 if(ENABLE_CUNQA_BACKEND)
     target_compile_definitions(quantum_core PRIVATE QUANTUM_ENABLE_CUNQA)
+endif()
+
+if(ENABLE_QPU_BACKEND)
+    target_compile_definitions(quantum_core PRIVATE QUANTUM_ENABLE_QPU)
 endif()
 
 # --- CPU backend ---
@@ -70,9 +75,9 @@ if(ENABLE_GPU_BACKEND)
     target_link_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
 endif()
 
-# --- CUNQA backend ---
-if(ENABLE_CUNQA_BACKEND)
-    # CUNQABackend talks to cunqa directly over ZeroMQ + a JSON registry
+
+if(ENABLE_CUNQA_BACKEND OR ENABLE_QPU_BACKEND)
+    # CUNQABackend and QPUBackend talks to cunqa directly over ZeroMQ + a JSON registry
     # file (see backends/cunqa/cunqa_backend.cpp for why -- cunqa's own
     # CMake install doesn't export a linkable C++ library). That means
     # two new, ordinary dependencies, unrelated to cunqa's own build:
@@ -85,6 +90,7 @@ if(ENABLE_CUNQA_BACKEND)
     # fetching sources if nothing is found. The libzmq wire protocol is
     # stable across versions, so this does NOT need to match whatever
     # version cunqa itself was built against.
+
     include(FetchContent)
 
     find_package(nlohmann_json 3.11 QUIET)
@@ -129,6 +135,11 @@ if(ENABLE_CUNQA_BACKEND)
         )
         FetchContent_MakeAvailable(cppzmq)
     endif()
+    
+endif()
+
+# --- CUNQA backend ---
+if(ENABLE_CUNQA_BACKEND)
 
     add_library(quantum_backend_cunqa
         backends/cunqa/cunqa_backend.cpp
@@ -168,6 +179,58 @@ if(ENABLE_CUNQA_BACKEND)
     target_link_libraries(quantum_backend_cunqa PUBLIC quantum_core)
 endif()
 
+
+# --- QPU backend ---
+if(ENABLE_QPU_BACKEND)
+
+    # QPU backend uses nlohmann::json and ZeroMQ, just like CUNQA.
+    # The dependencies are fetched or discovered in the CUNQA block
+    # above when both backends are enabled.
+
+    add_library(quantum_backend_qpu
+        backends/qpu/qpu_backend.cpp
+        backends/qpu/qmio/qmio_backend.cpp
+        backends/qpu/utils/qasm2_export.cpp
+        backends/qpu/utils/safe_pickle.cpp
+    )
+
+    target_include_directories(quantum_backend_qpu PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/backends/qpu
+        ${CMAKE_CURRENT_SOURCE_DIR}/backends/qpu/qmio
+        ${CMAKE_CURRENT_SOURCE_DIR}/backends/qpu/utils
+    )
+
+    target_link_libraries(quantum_backend_qpu PUBLIC
+        quantum_core
+        quantum_backend_cpu
+        nlohmann_json::nlohmann_json
+    )
+
+    if(TARGET cppzmq)
+        target_link_libraries(quantum_backend_qpu PUBLIC cppzmq)
+    else()
+        target_include_directories(quantum_backend_qpu PUBLIC
+            ${cppzmq_SOURCE_DIR}
+        )
+    endif()
+
+    if(ZeroMQ_FOUND)
+        target_link_libraries(quantum_backend_qpu PUBLIC libzmq)
+    elseif(ZMQ_FOUND)
+        target_include_directories(quantum_backend_qpu PUBLIC
+            ${ZMQ_INCLUDE_DIRS}
+        )
+        target_link_libraries(quantum_backend_qpu PUBLIC
+            ${ZMQ_LIBRARIES}
+        )
+    endif()
+
+    target_link_libraries(quantum_core PUBLIC quantum_backend_qpu)
+    target_link_libraries(quantum_backend_qpu PUBLIC quantum_core)
+
+endif()
+
 # --- Example GPU ---
 # add_executable(bell_state_gpu examples/bell_state_gpu.cpp)
 # target_link_libraries(bell_state_gpu PRIVATE quantum_core)
@@ -181,5 +244,9 @@ endif()
 
 
 # --- Example CUNQA ---
-add_executable(bell_state_cunqa examples/bell_state_cunqa.cpp)
-target_link_libraries(bell_state_cunqa PRIVATE quantum_core)
+# add_executable(bell_state_cunqa examples/bell_state_cunqa.cpp)
+# target_link_libraries(bell_state_cunqa PRIVATE quantum_core)
+
+# --- Example QPU ---
+add_executable(bell_state_qpu examples/bell_state_qpu.cpp)
+target_link_libraries(bell_state_qpu PRIVATE quantum_core)

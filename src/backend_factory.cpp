@@ -11,6 +11,7 @@
 
 #ifdef QUANTUM_ENABLE_QPU
 #include "../backends/qpu/qpu_backend.hpp"
+#include "../backends/qpu/qmio/qmio_backend.hpp"
 #endif
 
 #include <stdexcept>
@@ -36,12 +37,14 @@ std::unique_ptr<Backend> BackendFactory::create(DeviceType type) {
             #else
                 throw std::runtime_error("CUNQA backend was not built.");
             #endif
-        case DeviceType::QPU:
+        case DeviceType::QMIO:
             #ifdef QUANTUM_ENABLE_QPU
-                return std::make_unique<backends::QPUBackend>();
+                return std::make_unique<backends::QmioBackend>();
             #else
                 throw std::runtime_error("QPU backend was not built.");
             #endif
+        case DeviceType::QPU:
+            throw std::runtime_error("QPU backend must be from specific provider.");
         case DeviceType::CUSTOM:
             throw std::runtime_error("CUSTOM backend not implemented yet.");
     }
