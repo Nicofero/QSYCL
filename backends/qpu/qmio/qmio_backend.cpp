@@ -61,11 +61,11 @@ long long tket_opt_value(unsigned level) {
         case 0: return 0;  // TketOptimizations::Empty -- no compilation/routing
         case 1: return 1;  // DefaultMappingPass only
         case 2: return 18; // + circuit simplifications
-        case 3: return 30; // full optimization including SWAP routing
+        // case 3: return 30; // full optimization including SWAP routing
         default:
             throw std::runtime_error(
                 "QmioBackend: unsupported optimization level " + std::to_string(level) +
-                "; expected 0, 1, 2 or 3");
+                "; expected 0, 1 or 2");
     }
 }
 
@@ -165,6 +165,8 @@ QmioBackend::QmioBackend(std::string endpoint, std::unique_ptr<Backend> fallback
             std::ifstream file(qpu_registry_path());
             if (file) {
                 std::getline(file, endpoint_);
+            }else{
+                endpoint_ = "tcp://10.255.3.70:5556";
             }
         }
     }
@@ -272,8 +274,8 @@ std::vector<std::uint8_t> QmioBackend::send_and_receive(
         // safe.
         zmq::message_t msg(request.begin(), request.end());
         try {
-            std::cout << "[QmioBackend] sending request of " << msg.size() << " bytes to " << endpoint_ << "\n";
-            std::cout << "[QmioBackend] request content: " << std::string(request.begin(), request.end()) << "\n";
+            // std::cout << "[QmioBackend] sending request of " << msg.size() << " bytes to " << endpoint_ << "\n";
+            // std::cout << "[QmioBackend] request content: " << std::string(request.begin(), request.end()) << "\n";
             zmq::send_result_t sent = conn_->socket->send(msg, zmq::send_flags::none);
             if (!sent) {
                 last_error = "send timed out after " + std::to_string(recv_timeout_.count()) + " ms";
@@ -336,8 +338,8 @@ QPUBackend::SampleResult QmioBackend::submit_circuit(
     std::string program = to_qasm2(num_qubits_, gate_buffer_, qubits);
     std::string config_json = build_config_json(shots);
 
-    std::cout << "[QmioBackend] program:\n" << program << "\n";
-    std::cout << "[QmioBackend] config_json:\n" << config_json << "\n";
+    // std::cout << "[QmioBackend] program:\n" << program << "\n";
+    // std::cout << "[QmioBackend] config_json:\n" << config_json << "\n";
 
     auto request = safe_pickle::encode_str_tuple(program, config_json);
     auto reply_bytes = send_and_receive(request);

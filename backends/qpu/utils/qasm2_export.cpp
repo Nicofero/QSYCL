@@ -28,7 +28,7 @@ std::string to_qasm2(std::size_t num_qubits,
                       const std::vector<GateOp>& gates,
                       const std::vector<std::size_t>& measured_qubits) {
     std::ostringstream out;
-    out << "OPENQASM 2.0;\n";
+    out << "OPENQASM 3.0;\n";
     out << "include \"qelib1.inc\";\n";
     out << "qreg q[" << num_qubits << "];\n";
     out << "creg c[" << measured_qubits.size() << "];\n";
