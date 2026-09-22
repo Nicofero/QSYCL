@@ -96,7 +96,7 @@ backend directly instead of going through `BackendFactory`.
   26–28 qubits depending on available RAM.
 - No gate fusion or circuit optimization pass: gates are applied one at a time, exactly
   as scheduled.
-- `CPUBackend::sample()` regenerates the full probability distribution each call rather
+- `CPUBackend::sample()` of simulator backends regenerates the full probability distribution each call rather
   than caching it across repeated sampling.
 
 ## Next steps
