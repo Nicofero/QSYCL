@@ -8,8 +8,12 @@ int main() {
     // 1. Build the circuit with the user-facing API. No device concepts here.
     Circuit ghz(2);
 
-    ghz.ry(0, M_PI_2);
-    ghz.cnot(0, 1);
+    ghz.h(0);
+    ghz.cry(0,1, M_PI_2);
+    // ghz.ry(0, M_PI_4);
+    // ghz.cnot(0,1);
+    // ghz.ry(0, -M_PI_4);
+    // ghz.cnot(0,1);
     // ghz.x(0);
 
     // 2. Pick a device and get a runtime for it. Swapping DeviceType::CPU

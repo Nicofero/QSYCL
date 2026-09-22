@@ -244,9 +244,14 @@ endif()
 
 
 # --- Example CUNQA ---
-# add_executable(bell_state_cunqa examples/bell_state_cunqa.cpp)
-# target_link_libraries(bell_state_cunqa PRIVATE quantum_core)
+if (ENABLE_CUNQA_BACKEND)
+    add_executable(bell_state_cunqa examples/bell_state_cunqa.cpp)
+    target_link_libraries(bell_state_cunqa PRIVATE quantum_core)
+
+endif()
 
 # --- Example QPU ---
-add_executable(bell_state_qpu examples/bell_state_qpu.cpp)
-target_link_libraries(bell_state_qpu PRIVATE quantum_core)
+if (ENABLE_QPU_BACKEND)
+    add_executable(bell_state_qpu examples/bell_state_qpu.cpp)
+    target_link_libraries(bell_state_qpu PRIVATE quantum_core)
+endif()

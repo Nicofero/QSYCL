@@ -131,6 +131,87 @@ json gate_to_instruction(const GateOp& op) {
     return instr;
 }
 
+std::vector<GateOp> deconstruct_gate(const GateOp& op) {
+    std::string label = op.label;
+
+    std::transform(
+        label.begin(),
+        label.end(),
+        label.begin(),
+        [](unsigned char c) {
+            return std::tolower(c);
+        }
+    );
+
+    if (label != "crx" &&
+        label != "cry" &&
+        label != "crz") {
+        return {op};
+    }
+
+    if (op.qubits.size() != 2) {
+        throw std::runtime_error(
+            "Malformed " + label +
+            ": expected 2 qubits"
+        );
+    }
+
+    if (op.params.size() != 1) {
+        throw std::runtime_error(
+            "Malformed " + label +
+            ": expected 1 parameter"
+        );
+    }
+
+    const std::size_t control = op.qubits[0];
+    const std::size_t target  = op.qubits[1];
+    const double theta = op.params[0];
+
+    std::string rotation;
+
+    if (label == "crx") {
+        rotation = "rx";
+    } else if (label == "cry") {
+        rotation = "ry";
+    } else {
+        rotation = "rz";
+    }
+
+    return {
+        GateOp{
+            GateType::RX,
+            {target},
+            {theta / 2.0},
+            rotation,
+            false
+        },
+
+        GateOp{
+            GateType::CNOT,
+            {control, target},
+            {},
+            "cx",
+            false
+        },
+
+        GateOp{
+            GateType::RX,
+            {target},
+            {-theta / 2.0},
+            rotation,
+            false
+        },
+
+        GateOp{
+            GateType::CNOT,
+            {control, target},
+            {},
+            "cx",
+            false
+        }
+    };
+}
+
 } // namespace
 
 struct CUNQABackend::QpuHandle {
@@ -261,7 +342,9 @@ CUNQABackend::SampleResult CUNQABackend::run_on_cunqa(
     // single-element arrays here too, and there's no "save" key.
     json instructions = json::array();
     for (const auto& op : gate_buffer_) {
-        instructions.push_back(gate_to_instruction(op));
+        for (const auto& decomposed_op : deconstruct_gate(op)) {    // Atomic deconstruction of gates
+            instructions.push_back(gate_to_instruction(decomposed_op));
+        }
     }
     for (std::size_t clbit = 0; clbit < measured.size(); ++clbit) {
         instructions.push_back({
