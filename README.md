@@ -102,7 +102,7 @@ backend directly instead of going through `BackendFactory`.
 - `CPUBackend::sample()` regenerates the full probability distribution each call rather
   than caching it across repeated sampling.
 
-## Future work
+## Next steps
 
 - [ ] Additional simulator backends beyond the current state-vector CPU/GPU implementations.
 - [ ] Additional QPU hardware behind the existing abstract QPU interface, alongside QMIO.

@@ -135,80 +135,56 @@ std::vector<GateOp> deconstruct_gate(const GateOp& op) {
     std::string label = op.label;
 
     std::transform(
-        label.begin(),
-        label.end(),
-        label.begin(),
-        [](unsigned char c) {
-            return std::tolower(c);
-        }
+        label.begin(), label.end(), label.begin(),
+        [](unsigned char c) { return std::tolower(c); }
     );
 
-    if (label != "crx" &&
-        label != "cry" &&
-        label != "crz") {
+    if (label != "crx" && label != "cry" && label != "crz") {
         return {op};
     }
 
     if (op.qubits.size() != 2) {
-        throw std::runtime_error(
-            "Malformed " + label +
-            ": expected 2 qubits"
-        );
+        throw std::runtime_error("Malformed " + label + ": expected 2 qubits");
     }
-
     if (op.params.size() != 1) {
-        throw std::runtime_error(
-            "Malformed " + label +
-            ": expected 1 parameter"
-        );
+        throw std::runtime_error("Malformed " + label + ": expected 1 parameter");
     }
 
     const std::size_t control = op.qubits[0];
     const std::size_t target  = op.qubits[1];
     const double theta = op.params[0];
 
-    std::string rotation;
-
-    if (label == "crx") {
-        rotation = "rx";
-    } else if (label == "cry") {
-        rotation = "ry";
-    } else {
-        rotation = "rz";
+    // CRZ/CRY: X anticommutes with both Z and Y, which is exactly what
+    // CNOT exploits on the target -> R(theta/2), CNOT, R(-theta/2), CNOT
+    // implements the controlled rotation directly.
+    if (label == "crz") {
+        return {
+            GateOp{GateType::RZ,   {target},          {theta / 2.0},  "rz", false},
+            GateOp{GateType::CNOT, {control, target},  {},             "cx", false},
+            GateOp{GateType::RZ,   {target},          {-theta / 2.0}, "rz", false},
+            GateOp{GateType::CNOT, {control, target},  {},             "cx", false}
+        };
     }
 
+    if (label == "cry") {
+        return {
+            GateOp{GateType::RY,   {target},          {theta / 2.0},  "ry", false},
+            GateOp{GateType::CNOT, {control, target},  {},             "cx", false},
+            GateOp{GateType::RY,   {target},          {-theta / 2.0}, "ry", false},
+            GateOp{GateType::CNOT, {control, target},  {},             "cx", false}
+        };
+    }
+
+    // label == "crx": X commutes with itself, so the CNOT sandwich above
+    // does NOT implement CRX. Use Rx(theta) = H * Rz(theta) * H to reuse
+    // the CRZ pattern under a Hadamard basis change on the target.
     return {
-        GateOp{
-            GateType::RX,
-            {target},
-            {theta / 2.0},
-            rotation,
-            false
-        },
-
-        GateOp{
-            GateType::CNOT,
-            {control, target},
-            {},
-            "cx",
-            false
-        },
-
-        GateOp{
-            GateType::RX,
-            {target},
-            {-theta / 2.0},
-            rotation,
-            false
-        },
-
-        GateOp{
-            GateType::CNOT,
-            {control, target},
-            {},
-            "cx",
-            false
-        }
+        GateOp{GateType::H,    {target},          {},              "h",  false},
+        GateOp{GateType::RZ,   {target},          {theta / 2.0},   "rz", false},
+        GateOp{GateType::CNOT, {control, target},  {},              "cx", false},
+        GateOp{GateType::RZ,   {target},          {-theta / 2.0},  "rz", false},
+        GateOp{GateType::CNOT, {control, target},  {},              "cx", false},
+        GateOp{GateType::H,    {target},          {},              "h",  false}
     };
 }
 

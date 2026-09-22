@@ -59,7 +59,39 @@ std::string to_qasm2(std::size_t num_qubits,
                     "to_qasm2: gate '" + op.label + "' needs a qubit and a parameter");
             }
             out << qasm_name << "(" << op.params[0] << ") q[" << op.qubits[0] << "];\n";
-        }   // THE CR* CASE REMAINS NOT DONE 
+        }   
+        else if (one_of(label, {"crx", "cry", "crz"})) {
+            if (op.qubits.size() < 2 || op.params.empty()) {
+                throw std::runtime_error(
+                    "to_qasm2: gate '" + op.label +
+                    "' needs two qubits and a parameter");
+            }
+
+            const auto control = op.qubits[0];
+            const auto target  = op.qubits[1];
+            const double theta = op.params[0];
+
+            if (label == "crz") {
+                out << "rz(" << theta / 2.0 << ") q[" << target << "];\n";
+                out << "cx q[" << control << "],q[" << target << "];\n";
+                out << "rz(" << -theta / 2.0 << ") q[" << target << "];\n";
+                out << "cx q[" << control << "],q[" << target << "];\n";
+
+            } else if (label == "cry") {
+                out << "ry(" << theta / 2.0 << ") q[" << target << "];\n";
+                out << "cx q[" << control << "],q[" << target << "];\n";
+                out << "ry(" << -theta / 2.0 << ") q[" << target << "];\n";
+                out << "cx q[" << control << "],q[" << target << "];\n";
+
+            } else { // crx
+                out << "h q[" << target << "];\n";
+                out << "rz(" << theta / 2.0 << ") q[" << target << "];\n";
+                out << "cx q[" << control << "],q[" << target << "];\n";
+                out << "rz(" << -theta / 2.0 << ") q[" << target << "];\n";
+                out << "cx q[" << control << "],q[" << target << "];\n";
+                out << "h q[" << target << "];\n";
+            }
+        }
         else {
             throw std::runtime_error(
                 "to_qasm2: gate '" + op.label +
