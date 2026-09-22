@@ -1,4 +1,4 @@
-# quantum_sycl
+# QSYCL
 
 A layered SYCL quantum circuit simulator:
 
@@ -19,14 +19,15 @@ Implementation      backends/cpu/cpu_backend.{hpp,cpp}  <- implemented
 ```
 
 Only `Backend` is device-specific. `Circuit`, `QuantumRuntime`, and
-`DeviceSelector` never include anything from `backends/`.
+`DeviceSelector` are fully device-agnostic.
 
 ## Build
 
 Requires the Intel oneAPI DPC++/C++ Compiler (`icpx`), which provides SYCL.
 
 ```bash
-source /opt/intel/oneapi/setvars.sh   # sets up icpx on PATH
+source /path/to/oneapi/setvars.sh   # sets up icpx on PATH
+cd API
 cmake -B build -DCMAKE_CXX_COMPILER=icpx # -DENABLE_GPU_BACKEND=ON -DENABLE_CUNQA_BACKEND=ON
 cmake --build build
 ./build/bell_state
@@ -120,6 +121,39 @@ to surface as silent crashes rather than compile errors:
   `queue_` member that allocated it in `initialize()` -- mixing queues
   (or contexts) here is a common source of GPU segfaults.
 
+### GPU adapter note
+
+For Intel OneAPI versions 2025.3 or later, you need to  build the GPU adapter from source. The instructions are the following ([see this issue](https://github.com/intel/llvm/issues/20945)):
+
+1. After setting the environment,make sure you have an appropriate CUDA toolkit version (e.g. 12.3.0) in your environment.
+2. Clone [llvm repo](https://github.com/intel/llvm) 
+   ```bash
+    git clone https://github.com/intel/llvm.git
+    ```
+3. Checkout commit [5c82df75db7d](https://github.com/intel/llvm/commit/5c82df75db7d1619a1aebafc85b7c2d384415aaa)
+    ```bash
+    git checkout 5c82df75db7d
+    ```
+4. `cd /path/to/llvm/unified-runtime`
+5. Configure build
+   ```bash
+   cmake -S . -B build -DUR_BUILD_TESTS=OFF -DUR_BUILD_ADAPTER_CUDA=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DCMAKE_INSTALL_PREFIX=/path/to/intel-unified-runtime-6.3.0-rc1
+   ```
+6. Build
+   ```bash
+   cmake --build build -j
+   ```
+7. Install:
+   ```bash
+   cmake --install build
+   ```
+8. Set paths appropiately:
+    ```bash
+    export LD_LIBRARY_PATH=${ONEAPI_ROOT}/compiler/latest/lib:$LD_LIBRARY_PATH
+    export UR_ADAPTERS_SEARCH_PATH=/path/to/install/lib
+    ```
+9.  Check `sycl-ls` to see if your GPU is being detected.
+
 ## How the CUNQA backend works
 
 `backends/cunqa/cunqa_backend.cpp` talks directly to an already-qraised
@@ -175,3 +209,25 @@ and construct that backend directly instead of going through
   a time, exactly as scheduled.
 - `CPUBackend::sample()` regenerates the full probability distribution
   each call rather than caching it across repeated sampling.
+
+# MIT LICENSE
+
+Copyright (c) 2026 Nicolas Fernández Otero
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
