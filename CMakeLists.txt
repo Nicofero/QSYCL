@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
+
+if(NOT DEFINED CMAKE_CXX_COMPILER)
+    set(CMAKE_CXX_COMPILER icpx CACHE STRING "C++ compiler")
+endif()
+
 project(quantum_sycl CXX)
 
 set(CMAKE_CXX_STANDARD 17)

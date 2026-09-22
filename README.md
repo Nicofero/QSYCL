@@ -1,6 +1,13 @@
 # QSYCL
 
-A layered SYCL quantum circuit simulator:
+QSYCL is an **open-source** C++ framework that extends the SYCL heterogeneous-computing
+standard to quantum computing. It exposes quantum simulators, emulators, and real QPUs
+as first-class SYCL devices, so a single circuit-construction API runs unchanged across
+backends — switching hardware is just a matter of changing a device type, with no change
+to circuit-level code. Contributions and new backends are welcome; see
+[Adding a new device backend](#adding-a-new-device-backend) below.
+
+## Architecture
 
 ```
 Circuit API        include/quantum/circuit.hpp, src/circuit.cpp
@@ -13,30 +20,29 @@ Device Selector     include/quantum/device_selector.hpp, src/device_selector.cpp
                     (wraps SYCL device selection: CPU/GPU/FPGA/custom)
        |
 Backend             include/quantum/backend.hpp (abstract interface)
-Implementation      backends/cpu/cpu_backend.{hpp,cpp}  <- implemented
-                    backends/gpu/...                     <- add later
-                    backends/fpga/...                     <- add later
+Implementation      backends/cpu/     <- state-vector simulator, host
+                    backends/gpu/     <- state-vector simulator, NVIDIA GPU
+                    backends/cunqa/   <- delegates to the CUNQA emulator
+                    backends/qpu/     <- abstract QPU interface + QMIO implementation
 ```
 
-Only `Backend` is device-specific. `Circuit`, `QuantumRuntime`, and
-`DeviceSelector` are fully device-agnostic.
+Only `Backend` is device-specific. `Circuit`, `QuantumRuntime`, and `DeviceSelector`
+are fully device-agnostic.
 
 ## Build
 
 Requires the Intel oneAPI DPC++/C++ Compiler (`icpx`), which provides SYCL.
 
 ```bash
-source /path/to/oneapi/setvars.sh   # sets up icpx on PATH
-cd API
-cmake -B build -DCMAKE_CXX_COMPILER=icpx # -DENABLE_GPU_BACKEND=ON -DENABLE_CUNQA_BACKEND=ON
+source /path/to/intel/oneapi/setvars.sh   # sets up icpx on PATH
+cmake -B build # -DENABLE_GPU_BACKEND=ON -DENABLE_CUNQA_BACKEND=ON -DENABLE_QPU_BACKEND=ON
 cmake --build build
 ./build/bell_state
 ```
 
-If you're on a machine without Intel oneAPI, you can substitute another
-SYCL implementation (AdaptiveCpp/hipSYCL, ComputeCpp) by changing the
-compiler and, if needed, the `-fsycl` flags in `CMakeLists.txt` to that
-implementation's equivalents.
+If you're on a machine without Intel oneAPI, you can substitute another SYCL
+implementation (AdaptiveCpp/hipSYCL, ComputeCpp) by changing the compiler and,
+if needed, the `-fsycl` flags in `CMakeLists.txt` to that implementation's equivalents.
 
 ## Usage
 
@@ -49,185 +55,77 @@ using namespace quantum;
 Circuit bell(2);
 bell.h(0).cnot(0, 1);   // or bell.h(0); bell.cnot(0,1);
 
-
-
 QuantumRuntime runtime(DeviceType::CPU);
 runtime.run(bell);
 
-auto state = runtime.state_vector();          // exact amplitudes
-auto counts = runtime.sample_counts(bell, 1000); // simulated measurement shots
+auto state = runtime.state_vector();             // exact amplitudes (only simulated backends)
+auto counts = runtime.sample_counts(bell, 1000);  // simulated measurement shots
 ```
 
-Chainable gate calls: `h`, `x`, `y`, `z`, `s`, `t`, `rx`, `ry`, `rz`,`cnot`, `cz`, `crx`, `cry`, `crz`, `swap`, `measure`.
+Chainable gate calls: `h`, `x`, `y`, `z`, `s`, `t`, `rx`, `ry`, `rz`, `cnot`, `cz`, `crx`, `cry`, `crz`, `swap`, `measure`.
 
-## How the CPU backend works
+## Backends
 
-`backends/cpu/cpu_backend.cpp` holds a `2^num_qubits`-length state vector
-on the host and mutates it via SYCL kernels submitted to a CPU-selected
-`sycl::queue`:
+| Backend | Device type | What it does | Details |
+|---|---|---|---|
+| CPU | `DeviceType::CPU` | State-vector simulator, SYCL kernels on host | [backends/cpu/README.md](backends/cpu/README.md) |
+| GPU | `DeviceType::GPU` | State-vector simulator, SYCL kernels on NVIDIA GPU, state resident in USM | [backends/gpu/README.md](backends/gpu/README.md) |
+| CUNQA | `DeviceType::CUNQA` | Delegates to a qraised CUNQA vQPU over ZeroMQ; falls back to CPU | [backends/cunqa/README.md](backends/cunqa/README.md) |
+| QMIO | `DeviceType::QMIO` | Concrete implementation for CESGA's QMIO, using an abstract QPU interface | [backends/qpu/README.md](backends/qpu/README.md) |
 
-- **Single-qubit gates** run a kernel over `dim/2` work-items, each
-  responsible for one amplitude pair `(i0, i1)` that differ only in the
-  target qubit's bit, and apply the gate's 2x2 matrix to that pair.
-- **Controlled gates** (CNOT, CZ) reuse the same pairing but only touch
-  amplitudes where the control bit is set.
-- **SWAP** flips amplitude pairs whose two qubit bits are `(0,1)` and
-  `(1,0)`.
-- **Measurement** is handled by the runtime, not the backend's state
-  update: `probabilities()` derives `|amplitude|^2` per basis state, and
-  `sample()` draws from that distribution with `std::discrete_distribution`.
+The CPU and GPU backends compute locally via SYCL kernels; CUNQA and QPU use SYCL only for device selection and delegate execution to an external system.
 
-This is a reference implementation (readability over performance): it
-rebuilds a `sycl::buffer` per gate call rather than keeping the state
-resident on-device across a whole circuit. That's the natural place to
-optimize before scaling up, along with using USM `device` allocations
-instead of buffers.
+## Adding a new device backend
 
-## How the GPU backend works
+1. Create `backends/<name>/` implementing the `Backend` interface from
+   `include/quantum/backend.hpp` (mirror `backends/cpu` for simulation or `backends/cunqa` for dispatchers).
+2. Define the new `DeviceType` in `include/quantum/device_selector.hpp`.
+3. Define `DeviceSelector::make_queue(DeviceType::<Name>)` in `src/device_selector.cpp`.
+4. Register it in `src/backend_factory.cpp`'s `BackendFactory::create()`.
+5. Add the new source file and include dir to `CMakeLists.txt`.
+6. Add a `backends/<name>/README.md` documenting it, and link it from the table above.
 
-`backends/gpu/gpu_backend.cpp` holds the same `2^num_qubits`-length state vector, but as a USM (Unified Shared Memory) allocation living directly on the GPU, mutated via SYCL kernels submitted to a GPU-selected `sycl::queue`:
+Nothing in `Circuit`, `QuantumRuntime`, or user code needs to change: callers just pass
+the new `DeviceType` instead of `DeviceType::CPU`.
 
-- **Single-qubit gates** run a kernel over `dim/2` work-items, each
-  responsible for one amplitude pair `(i0, i1)` that differ only in the
-  target qubit's bit, and apply the gate's 2x2 matrix to that pair --
-  same indexing scheme as the CPU backend.
-- **Controlled gates** (CNOT, CZ) reuse the same pairing but only touch
-  amplitudes where the control bit is set.
-- **SWAP** flips amplitude pairs whose two qubit bits are `(0,1)` and
-  `(1,0)`.
-- **Measurement** is handled by the runtime, not the backend's state
-  update: `probabilities()` derives `|amplitude|^2` per basis state, and
-  `sample()` draws from that distribution with `std::discrete_distribution`.
-
-Unlike the CPU backend, the state vector is allocated once with
-`sycl::malloc_device<Complex>` in `initialize()` and stays resident on
-the GPU for the whole circuit -- gates never round-trip to the host,
-only `get_state()`/`probabilities()` do (via an explicit
-`queue_.memcpy()` back to a host `std::vector`). This is the main reason
-a GPU backend is worth having at all: PCIe transfer would dominate
-runtime if every gate synced back to host like the CPU reference
-implementation does.
-
-Two things to be careful of if you extend this file, since USM bugs tend
-to surface as silent crashes rather than compile errors:
-
-- **Never dereference `state_dev_` from host code.** It's a device
-  pointer; the only host-legal operations on it are passing it to a
-  kernel (captured by value) or `queue_.memcpy()`/`sycl::free()`, both of
-  which go through the SYCL runtime rather than touching the address
-  directly.
-- **The queue that allocates must be the queue that frees.**
-  `free_state()` calls `sycl::free(state_dev_, queue_)` using the same
-  `queue_` member that allocated it in `initialize()` -- mixing queues
-  (or contexts) here is a common source of GPU segfaults.
-
-### GPU adapter note
-
-For Intel OneAPI versions 2025.3 or later, you need to  build the GPU adapter from source. The instructions are the following ([see this issue](https://github.com/intel/llvm/issues/20945)):
-
-1. After setting the environment,make sure you have an appropriate CUDA toolkit version (e.g. 12.3.0) in your environment.
-2. Clone [llvm repo](https://github.com/intel/llvm) 
-   ```bash
-    git clone https://github.com/intel/llvm.git
-    ```
-3. Checkout commit [5c82df75db7d](https://github.com/intel/llvm/commit/5c82df75db7d1619a1aebafc85b7c2d384415aaa)
-    ```bash
-    git checkout 5c82df75db7d
-    ```
-4. `cd /path/to/llvm/unified-runtime`
-5. Configure build
-   ```bash
-   cmake -S . -B build -DUR_BUILD_TESTS=OFF -DUR_BUILD_ADAPTER_CUDA=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DCMAKE_INSTALL_PREFIX=/path/to/intel-unified-runtime-6.3.0-rc1
-   ```
-6. Build
-   ```bash
-   cmake --build build -j
-   ```
-7. Install:
-   ```bash
-   cmake --install build
-   ```
-8. Set paths appropiately:
-    ```bash
-    export LD_LIBRARY_PATH=${ONEAPI_ROOT}/compiler/latest/lib:$LD_LIBRARY_PATH
-    export UR_ADAPTERS_SEARCH_PATH=/path/to/install/lib
-    ```
-9.  Check `sycl-ls` to see if your GPU is being detected.
-
-## How the CUNQA backend works
-
-`backends/cunqa/cunqa_backend.cpp` talks directly to an already-qraised
-cunqa vQPU over its ZeroMQ wire protocol, rather than linking against
-cunqa's own C++ sources — cunqa's CMake install only exports its CLI
-tools (`qraise`/`qdrop`/...) and its Python extension, not a public
-C++ library, so there's nothing stable to `find_package()` there:
-
-- **Discovery** reads `$STORE/.cunqa/qpus.json` directly — the same
-  registry file cunqa's own `get_QPUs()` reads — and connects to the
-  first available vQPU found. Unlike `get_QPUs(co_located=True)`, this
-  isn't restricted to same-node vQPUs: we talk to them over a plain
-  ZMQ/TCP endpoint regardless of where they're running.
-- **`apply_gate()` buffers, it doesn't execute.** Unlike the CPU
-  backend's per-gate kernel, cunqa only runs whole circuits as a unit,
-  so each call just appends to an in-memory instruction list.
-- **`sample()` triggers the actual submission**: it flushes the
-  buffered gates plus one explicit `measure` instruction per requested
-  qubit into cunqa's JSON circuit schema, sends it over a ZMQ `DEALER`
-  socket to the vQPU's endpoint, and blocks for the reply.
-- **`get_state()`/`probabilities()` are intentionally unsupported** on
-  a real vQPU and throw rather than approximate: real QPUs can't report
-  exact amplitudes, and since the point of cunqa is emulating that
-  hardware model, silently answering from a different simulation
-  underneath would be more misleading than an explicit error.
-- **Fallback to `CPUBackend`** happens transparently whenever no
-  qraised vQPU is found, or a submission fails at run time (e.g. a
-  time-boxed `qraise` allocation expired mid-session) — `device_name()`
-  reflects this, and a message is written to stderr, so a caller never
-  silently gets a different simulator than the one they asked for.
-
-## Adding a new device backend (e.g. QPU)
-
-1. Create `backends/qpu/qpu_backend.{hpp,cpp}` implementing the `Backend`
-   interface from `include/quantum/backend.hpp` (mirror `backends/cpu`).
-2. Use `DeviceSelector::make_queue(DeviceType::QPU)` to get your queue.
-3. Register it in `src/backend_factory.cpp`'s `BackendFactory::create()`.
-4. Add the new source file and include dir to `CMakeLists.txt`.
-
-Nothing in `Circuit`, `QuantumRuntime`, or user code needs to change: callers just pass `DeviceType::QPU` instead of `DeviceType::CPU`.
-
-For hardware SYCL can't auto-detect with a built-in selector (a custom
-ASIC, a specific FPGA image, picking among several GPUs by memory size),
-use `DeviceSelector::make_queue_custom()` with your own scoring function
-and construct that backend directly instead of going through
-`BackendFactory`.
+For hardware SYCL can't auto-detect with a built-in selector (a custom ASIC, a specific
+FPGA image, picking among several GPUs by memory size), use
+`DeviceSelector::make_queue_custom()` with your own scoring function and construct that
+backend directly instead of going through `BackendFactory`.
 
 ## Known limitations of this reference implementation
 
-- State-vector simulation only: memory is `O(2^n)`, so it's practical up
-  to roughly 26-28 qubits depending on available RAM.
-- No gate fusion or circuit optimization pass: gates are applied one at
-  a time, exactly as scheduled.
-- `CPUBackend::sample()` regenerates the full probability distribution
-  each call rather than caching it across repeated sampling.
+- State-vector simulation only: memory is `O(2^n)`, so it's practical up to roughly
+  26–28 qubits depending on available RAM.
+- No gate fusion or circuit optimization pass: gates are applied one at a time, exactly
+  as scheduled.
+- `CPUBackend::sample()` regenerates the full probability distribution each call rather
+  than caching it across repeated sampling.
 
-# MIT LICENSE
+## Future work
 
-Copyright (c) 2026 Nicolas Fernández Otero
+- [ ] Additional simulator backends beyond the current state-vector CPU/GPU implementations.
+- [ ] Additional QPU hardware behind the existing abstract QPU interface, alongside QMIO.
+- [ ] Native execution of variational quantum algorithms (VQAs) within the SYCL execution model.
+- [ ] Gate fusion / circuit optimization passes ahead of execution, by using a backend (first idea)
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+## License
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+MIT License — Copyright (c) 2026 Nicolás Fernández Otero
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to deal in the Software
+without restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be included in all copies
+or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+THE USE OR OTHER DEALINGS IN THE SOFTWARE.
