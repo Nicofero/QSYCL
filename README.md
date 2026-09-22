@@ -1,11 +1,6 @@
 # QSYCL
 
-QSYCL is an **open-source** C++ framework that extends the SYCL heterogeneous-computing
-standard to quantum computing. It exposes quantum simulators, emulators, and real QPUs
-as first-class SYCL devices, so a single circuit-construction API runs unchanged across
-backends — switching hardware is just a matter of changing a device type, with no change
-to circuit-level code. Contributions and new backends are welcome; see
-[Adding a new device backend](#adding-a-new-device-backend) below.
+QSYCL is an **open-source** C++ framework that extends the SYCL heterogeneous-computing standard to quantum computing. It exposes quantum simulators, emulators, and real QPUs as first-class SYCL devices, so a single circuit-construction API runs unchanged across backends. Thus, switching hardware is just a matter of changing a device type, with no change to circuit-level code. Contributions and new backends are welcome; see [Adding a new device backend](#adding-a-new-device-backend) below.
 
 ## Architecture
 
