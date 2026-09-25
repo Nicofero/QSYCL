@@ -99,6 +99,24 @@ backend directly instead of going through `BackendFactory`.
 - `CPUBackend::sample()` of simulator backends regenerates the full probability distribution each call rather
   than caching it across repeated sampling.
 
+## Build from Dockerfile to Apptainer
+
+The Dockerfile provides the SYCL environment and compiles the library. First, build and test the Docker image:
+
+```bash
+docker build -t qsycl .
+docker run --rm -it qsycl
+```
+
+Once the image has been verified, convert it to an Apptainer SIF image:
+
+```bash
+apptainer build qsycl.sif docker-daemon://qsycl:latest
+```
+
+The resulting `qsycl.sif` image contains the required environment, dependencies, and compiled library.
+
+
 ## Next steps
 
 - [ ] Additional simulator backends beyond the current state-vector CPU/GPU implementations.
