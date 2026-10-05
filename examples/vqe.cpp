@@ -18,7 +18,7 @@ int main() {
 
     // 3. Pick a device and let VQA choose the best execution strategy the
     //    backend supports (native -> batched -> sequential).
-    QuantumRuntime runtime(DeviceType::CPU);
+    QuantumRuntime runtime(DeviceType::CUNQA);
     std::cout << "Running on: " << runtime.device_name() << "\n";
 
     VQA vqa(runtime, ansatz, H);
@@ -27,6 +27,12 @@ int main() {
     opt.gradient = GradientMethod::ParameterShift;
     opt.learning_rate = 0.1;
     opt.max_iterations = 200;
+    // The optimizer's parameter-update kernels run on THIS device,
+    // independent of the DeviceType circuits execute on above (only
+    // honoured natively by CPUBackend/GPUBackend; e.g. set this to
+    // DeviceType::GPU while `runtime` above uses DeviceType::CPU circuits,
+    // or leave it CPU while circuits run on a GPU, as here).
+    opt.optimizer_device = DeviceType::CPU;
 
     VQAResult res = vqa.minimize({0.4, 0.4}, opt);
 

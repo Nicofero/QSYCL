@@ -1,5 +1,6 @@
 #include "gpu_backend.hpp"
 #include "quantum/gates.hpp"
+#include "quantum/native_vqa.hpp"
 #include "quantum/device_selector.hpp"
 #include <stdexcept>
 #include <numeric>
@@ -172,6 +173,18 @@ std::vector<unsigned long long> GPUBackend::sample(
 
 std::string GPUBackend::device_name() const {
     return "GPU (SYCL: " + queue_.get_device().get_info<sycl::info::device::name>() + ")";
+}
+
+std::vector<double> GPUBackend::expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                              const EvalBatch& batch) {
+    return native::expectation_batch(queue_, ansatz, obs, batch);
+}
+
+bool GPUBackend::run_native_vqa(const Circuit& ansatz, const Observable& obs,
+                           const VQAOptions& options,
+                           std::vector<double>& theta, VQAResult& result) {
+    sycl::queue optimizer_q = DeviceSelector::make_queue(options.optimizer_device);
+    return native::run_native_vqa(queue_, optimizer_q, ansatz, obs, options, theta, result);
 }
 
 } // namespace quantum::backends

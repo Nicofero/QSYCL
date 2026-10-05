@@ -1,4 +1,5 @@
 #include "cunqa_backend.hpp"
+#include "quantum/shot_expectation.hpp"
 
 #include <zmq.hpp>
 #include <nlohmann/json.hpp>
@@ -400,6 +401,19 @@ std::string CUNQABackend::device_name() const {
         return "CUNQA (vQPU: " + qpu_->entry.id + ")";
     }
     return "CUNQA (fallback: " + fallback_->device_name() + ")";
+}
+
+std::vector<double> CUNQABackend::expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                                     const EvalBatch& batch) {
+    if (!using_cunqa_) {
+        return fallback_->expectation_batch(ansatz, obs, batch);
+    }
+    // See QPUBackend::expectation_batch's note: deliberately doesn't catch
+    // a mid-batch submission failure and silently switch some rows to the
+    // fallback -- a run_on_cunqa() failure here surfaces as a real
+    // exception, same as it would from a bare sample() call that nothing
+    // downstream caught.
+    return native::shot_based_expectation_batch(*this, ansatz, obs, batch, batch.shots);
 }
 
 } // namespace backends

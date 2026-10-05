@@ -50,6 +50,15 @@ public:
         const std::vector<std::size_t>& qubits, std::size_t shots) override;
     std::string device_name() const override;
 
+    // get_state() is unsupported on a real vQPU, so the default
+    // Backend::expectation_batch (which reads the state back) won't work
+    // there either. Shot-based estimate instead, through nothing but
+    // initialize()/apply_gate()/sample() -- see quantum/shot_expectation.hpp.
+    // Falls through to `fallback_` when no vQPU was found, same as every
+    // other method here.
+    std::vector<double> expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                          const EvalBatch& batch) override;
+
 private:
     struct QpuHandle;   // registry entry + open ZMQ DEALER socket, in the .cpp
     struct SampleResult { std::vector<unsigned long long> outcomes; };

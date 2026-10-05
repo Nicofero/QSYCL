@@ -37,7 +37,7 @@ private:
     // Builds the batch [plain evaluation, shifted evaluations...] and turns
     // the results into (energy, gradient) with ONE backend call.
     double energy_and_gradient(const std::vector<double>& theta, GradientMethod method,
-                               double fd_eps, std::vector<double>& grad, std::size_t& evals);
+                               double fd_eps, std::size_t shots, std::vector<double>& grad, std::size_t& evals);
 
     QuantumRuntime& runtime_;
     Circuit ansatz_;

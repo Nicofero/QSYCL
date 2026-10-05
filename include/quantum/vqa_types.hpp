@@ -1,5 +1,6 @@
 #pragma once
 
+#include "quantum/device_selector.hpp"
 #include <cstddef>
 #include <vector>
 
@@ -34,6 +35,26 @@ struct VQAOptions {
     // transparently fall back to the host-driven loop, which still batches
     // circuit evaluations through Backend::expectation_batch().
     bool prefer_native = true;
+
+    // Device that runs the optimizer's parameter-update kernels (Adam
+    // moments, the gradient-descent step, the SPSA update). This is
+    // DELIBERATELY independent of whichever device executes the circuits
+    // (that's QuantumRuntime's DeviceType / the backend you constructed):
+    // you can run circuits on DeviceType::GPU while optimizer_device stays
+    // DeviceType::CPU, or vice versa. Only consulted by backends whose
+    // run_native_vqa() honours it (CPUBackend and GPUBackend do); ignored
+    // by the host-driven fallback, which always updates theta on the host.
+    // Default CPU: the update is O(num_params) per iteration, almost never
+    // worth a GPU on its own, but any DeviceType is valid here.
+    DeviceType optimizer_device = DeviceType::CPU;
+
+    // Shots per circuit evaluation. Ignored by exact state-vector backends
+    // (CPU/GPU); used by any backend that can only estimate <H> by
+    // sampling (QPUBackend and CUNQABackend on real/remote hardware -- see
+    // quantum/shot_expectation.hpp). VQA::minimize() copies this into every
+    // EvalBatch it builds; VQA::cost()/gradient() (no VQAOptions in their
+    // signature) use EvalBatch's own default below.
+    std::size_t shots = 1024;
 };
 
 struct VQAResult {
@@ -56,6 +77,7 @@ struct EvalBatch {
     std::vector<double> thetas;   // count * num_params, row-major
     std::vector<int>    shift_op; // empty, or one entry per request (-1 = none)
     std::vector<double> shift;    // empty, or one entry per request
+    std::size_t shots = 1024;     // one value for the whole batch; shot-based backends only
 
     void add(const std::vector<double>& theta, int op = -1, double delta = 0.0) {
         if (count == 0) num_params = theta.size();

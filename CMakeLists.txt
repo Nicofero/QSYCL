@@ -33,6 +33,9 @@ add_library(quantum_core
     src/backend.cpp
     src/observable.cpp
     src/vqa.cpp
+    src/gradient_utils.cpp
+    src/native_vqa.cpp
+    src/shot_expectation.cpp
 )
 target_include_directories(quantum_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -274,6 +277,3 @@ if (ENABLE_QPU_BACKEND)
     add_executable(bell_state_qpu examples/bell_state_qpu.cpp)
     target_link_libraries(bell_state_qpu PRIVATE quantum_core)
 endif()
-
-add_executable(qft examples/qft.cpp)
-target_link_libraries(qft PRIVATE quantum_core)

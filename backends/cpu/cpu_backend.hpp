@@ -22,6 +22,16 @@ public:
         const std::vector<std::size_t>& qubits, std::size_t shots) override;
     std::string device_name() const override;
 
+    // Native VQA hooks (see quantum/native_vqa.hpp for the shared implementation):
+    // circuit kernels run on this backend's own queue_; the optimizer update
+    // kernels run on a queue built from options.optimizer_device, which may be
+    // a different device entirely.
+    std::vector<double> expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                          const EvalBatch& batch) override;
+    bool run_native_vqa(const Circuit& ansatz, const Observable& obs,
+                        const VQAOptions& options,
+                        std::vector<double>& theta, VQAResult& result) override;
+
 private:
     void apply_single_qubit_matrix(std::size_t qubit, const Matrix2x2& m);
     void apply_controlled_matrix(std::size_t control, std::size_t target, const Matrix2x2& m);

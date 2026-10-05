@@ -1,17 +1,10 @@
 #include "quantum/vqa.hpp"
+#include "quantum/gradient_utils.hpp"
 #include <cmath>
 #include <random>
 #include <stdexcept>
 
 namespace quantum {
-
-namespace {
-constexpr double kHalfPi = 1.57079632679489661923;
-
-bool is_shiftable(GateType t) {
-    return t == GateType::RX || t == GateType::RY || t == GateType::RZ;
-}
-} // namespace
 
 VQA::VQA(QuantumRuntime& runtime, Circuit ansatz, Observable observable)
     : runtime_(runtime), ansatz_(std::move(ansatz)), observable_(std::move(observable)) {
@@ -30,41 +23,13 @@ double VQA::cost(const std::vector<double>& theta) {
 }
 
 double VQA::energy_and_gradient(const std::vector<double>& theta, GradientMethod method,
-                                double fd_eps, std::vector<double>& grad, std::size_t& evals) {
-    const std::size_t P = ansatz_.num_params();
-    grad.assign(P, 0.0);
+                                double fd_eps, std::size_t shots,
+                                std::vector<double>& grad, std::size_t& evals) {
+    grad.assign(ansatz_.num_params(), 0.0);
 
-    EvalBatch batch;
-    batch.add(theta); // request 0: the plain energy
-
-    struct Term { std::size_t param; double weight; }; // grad[param] += weight * (E+ - E-)
-    std::vector<Term> terms;
-
-    if (method == GradientMethod::ParameterShift) {
-        const auto& ops = ansatz_.operations();
-        for (std::size_t k = 0; k < ops.size(); ++k) {
-            const auto& op = ops[k];
-            if (!op.is_parametric()) continue;
-            if (!is_shiftable(op.type)) {
-                throw std::invalid_argument(
-                    "VQA: parameter-shift supports only RX/RY/RZ; use GradientMethod::FiniteDifference "
-                    "for gate '" + op.label + "'");
-            }
-            const Param& a = op.symbolic[0];
-            if (!a.is_symbolic()) continue;
-            // one gate occurrence contributes  scale * (E(phi+pi/2) - E(phi-pi/2)) / 2
-            batch.add(theta, static_cast<int>(k), +kHalfPi);
-            batch.add(theta, static_cast<int>(k), -kHalfPi);
-            terms.push_back({static_cast<std::size_t>(a.index), 0.5 * a.scale});
-        }
-    } else {
-        for (std::size_t i = 0; i < P; ++i) {
-            std::vector<double> tp = theta, tm = theta;
-            tp[i] += fd_eps; tm[i] -= fd_eps;
-            batch.add(tp); batch.add(tm);
-            terms.push_back({i, 0.5 / fd_eps});
-        }
-    }
+    std::vector<GradientTerm> terms;
+    EvalBatch batch = build_gradient_batch(ansatz_, theta, method, fd_eps, terms);
+    batch.shots = shots;
 
     const auto e = runtime_.expectation_batch(ansatz_, observable_, batch);
     evals += batch.count;
@@ -77,7 +42,7 @@ double VQA::energy_and_gradient(const std::vector<double>& theta, GradientMethod
 std::vector<double> VQA::gradient(const std::vector<double>& theta, GradientMethod method) {
     std::vector<double> g;
     std::size_t evals = 0;
-    energy_and_gradient(theta, method, 1e-4, g, evals);
+    energy_and_gradient(theta, method, 1e-4, EvalBatch{}.shots /* default shots */, g, evals);
     return g;
 }
 
@@ -108,14 +73,14 @@ VQAResult VQA::minimize(std::vector<double> theta, const VQAOptions& opt) {
                 delta[i] = (rng() & 1ULL) ? 1.0 : -1.0;
                 tp[i] += ck * delta[i]; tm[i] -= ck * delta[i];
             }
-            EvalBatch b; b.add(tp); b.add(tm);
+            EvalBatch b; b.add(tp); b.add(tm); b.shots = opt.shots;
             const auto r = runtime_.expectation_batch(ansatz_, observable_, b);
             res.evaluations += 2;
             e = 0.5 * (r[0] + r[1]);
             for (std::size_t i = 0; i < P; ++i)
                 theta[i] -= ak * (r[0] - r[1]) / (2.0 * ck * delta[i]);
         } else {
-            e = energy_and_gradient(theta, opt.gradient, opt.fd_epsilon, g, res.evaluations);
+            e = energy_and_gradient(theta, opt.gradient, opt.fd_epsilon, opt.shots, g, res.evaluations);
             if (opt.optimizer == OptimizerKind::Adam) {
                 const double b1t = 1.0 - std::pow(opt.beta1, k + 1.0);
                 const double b2t = 1.0 - std::pow(opt.beta2, k + 1.0);
@@ -135,7 +100,8 @@ VQAResult VQA::minimize(std::vector<double> theta, const VQAOptions& opt) {
     }
 
     res.theta = theta;
-    res.energy = cost(theta);
+    { EvalBatch final_batch; final_batch.add(theta); final_batch.shots = opt.shots;
+      res.energy = runtime_.expectation_batch(ansatz_, observable_, final_batch).at(0); }
     ++res.evaluations;
     return res;
 }
