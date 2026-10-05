@@ -2,6 +2,7 @@
 #include "quantum/backend_factory.hpp"
 #include <numeric>
 #include <bitset>
+#include <stdexcept>
 
 namespace quantum {
 
@@ -12,11 +13,25 @@ QuantumRuntime::QuantumRuntime(DeviceType device_type)
     : backend_(BackendFactory::create(device_type)) {}
 
 void QuantumRuntime::run(const Circuit& circuit) {
+    if (circuit.is_parametric()) {
+        throw std::invalid_argument(
+            "QuantumRuntime::run: circuit has free parameters; call Circuit::bind(theta) first");
+    }
     num_qubits_ = circuit.num_qubits();
     backend_->initialize(num_qubits_);
     for (const auto& op : circuit.operations()) {
         backend_->apply_gate(op);
     }
+}
+
+double QuantumRuntime::expectation(const Circuit& circuit, const Observable& obs) {
+    run(circuit);
+    return backend_->expectation(obs);
+}
+
+std::vector<double> QuantumRuntime::expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                                      const EvalBatch& batch) {
+    return backend_->expectation_batch(ansatz, obs, batch);
 }
 
 std::vector<Complex> QuantumRuntime::state_vector() const {

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "quantum/types.hpp"
+#include "quantum/circuit.hpp"
+#include "quantum/observable.hpp"
+#include "quantum/vqa_types.hpp"
 #include <vector>
 #include <memory>
 #include <string>
@@ -36,6 +39,38 @@ public:
 
     // Human-readable identifier, e.g. "CPU (SYCL: Intel(R) Xeon(R) ...)".
     virtual std::string device_name() const = 0;
+
+    // ------------------------------------------------------------------
+    // Variational (VQA) hooks. ALL have working defaults built on the pure
+    // virtuals above, so an existing/user-defined backend supports VQAs with
+    // no changes. Override them progressively to go native:
+    //   1. expectation()        -> reduce <H> on-device, skip get_state()
+    //   2. expectation_batch()  -> evaluate many parameter sets in parallel
+    //   3. run_native_vqa()     -> run the optimizer itself on the device
+    // ------------------------------------------------------------------
+
+    // <psi|H|psi> for the CURRENT state (after initialize()/apply_gate()).
+    // Default: pull the state to host and evaluate there. Backends without a
+    // state vector (QPUs) should override this with a shot-based estimate.
+    virtual double expectation(const Observable& obs);
+
+    // Evaluate `ansatz` for every request in `batch`, returning one <H> per
+    // request. Default: run them one after another via initialize()/apply_gate()
+    // /expectation(). Native backends should override with a batched kernel
+    // (e.g. a [batch][2^n] USM state). Result order matches batch order.
+    virtual std::vector<double> expectation_batch(const Circuit& ansatz,
+                                                  const Observable& obs,
+                                                  const EvalBatch& batch);
+
+    // Full native optimization loop on the backend's own device. Return
+    // false (default) if unsupported; VQA then runs the host loop instead.
+    // If it returns true it must have filled `theta` and `result`.
+    virtual bool run_native_vqa(const Circuit& ansatz, const Observable& obs,
+                                const VQAOptions& options,
+                                std::vector<double>& theta, VQAResult& result) {
+        (void)ansatz; (void)obs; (void)options; (void)theta; (void)result;
+        return false;
+    }
 };
 
 } // namespace quantum

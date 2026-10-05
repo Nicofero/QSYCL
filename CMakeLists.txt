@@ -30,6 +30,9 @@ add_library(quantum_core
     src/runtime.cpp
     src/device_selector.cpp
     src/backend_factory.cpp
+    src/backend.cpp
+    src/observable.cpp
+    src/vqa.cpp
 )
 target_include_directories(quantum_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -244,9 +247,20 @@ endif()
 # target_link_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
 
 # --- Example CPU --- 
-# add_executable(bell_state examples/bell_state.cpp)
-# target_link_libraries(bell_state PRIVATE quantum_core)
+add_executable(bell_state examples/bell_state.cpp)
+target_link_libraries(bell_state PRIVATE quantum_core)
 
+
+# --- Example VQE (works on any backend; swap the DeviceType in the source) ---
+add_executable(vqe examples/vqe.cpp)
+target_link_libraries(vqe PRIVATE quantum_core)
+
+# --- Tests (host-only logic: Param/bind/Observable/VQA) ---
+option(BUILD_TESTS "Build the unit tests" OFF)
+if(BUILD_TESTS)
+    add_executable(test_vqa tests/test_vqa.cpp)
+    target_link_libraries(test_vqa PRIVATE quantum_core)
+endif()
 
 # --- Example CUNQA ---
 if (ENABLE_CUNQA_BACKEND)
@@ -260,3 +274,6 @@ if (ENABLE_QPU_BACKEND)
     add_executable(bell_state_qpu examples/bell_state_qpu.cpp)
     target_link_libraries(bell_state_qpu PRIVATE quantum_core)
 endif()
+
+add_executable(qft examples/qft.cpp)
+target_link_libraries(qft PRIVATE quantum_core)

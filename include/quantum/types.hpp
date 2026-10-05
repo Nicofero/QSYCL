@@ -6,6 +6,7 @@
 #include <cmath>
 #include <string>
 #include <ostream>
+#include "quantum/parameter.hpp"
 
 namespace quantum {
 
@@ -56,6 +57,18 @@ struct GateOp {
     std::vector<double> params;
     std::string label; // optional, for debugging/printing circuits
     bool dagger = false; // optional, for controlled/daggered gates
+
+    // Symbolic angle expressions, parallel to `params`. EMPTY for fully numeric
+    // gates (every existing backend only ever sees this case: the runtime
+    // requires Circuit::bind() first). When non-empty, symbolic[i] describes
+    // how params[i] is derived from the parameter vector; params[i] then holds
+    // only a placeholder (the expression's value at theta = 0).
+    std::vector<Param> symbolic;
+
+    bool is_parametric() const {
+        for (const auto& p : symbolic) if (p.is_symbolic()) return true;
+        return false;
+    }
 };
 
 // 2x2 unitary, row-major: [m00, m01, m10, m11]

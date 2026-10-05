@@ -19,7 +19,19 @@ public:
     explicit QuantumRuntime(DeviceType device_type); // convenience: use BackendFactory
 
     // Resets backend state and applies every gate in the circuit, in order.
+    // Throws if the circuit still has free parameters: call Circuit::bind() first.
     void run(const Circuit& circuit);
+
+    // Runs a fully bound circuit and returns <H> on the resulting state.
+    double expectation(const Circuit& circuit, const Observable& obs);
+
+    // Evaluates one parameterized ansatz for many parameter sets at once
+    // (see EvalBatch). Backends may execute the whole batch in parallel.
+    std::vector<double> expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                          const EvalBatch& batch);
+
+    // Escape hatch for layers (like VQA) that talk to backend capabilities.
+    Backend& backend() { return *backend_; }
 
     std::vector<Complex> state_vector() const;
     std::vector<double> probabilities() const;
