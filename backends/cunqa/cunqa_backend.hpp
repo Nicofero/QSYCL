@@ -59,6 +59,14 @@ public:
     std::vector<double> expectation_batch(const Circuit& ansatz, const Observable& obs,
                                           const EvalBatch& batch) override;
 
+    // Optimizer arithmetic (Adam/GD/SPSA) runs as SYCL kernels on
+    // options.optimizer_device; circuits still go through this backend's
+    // own expectation_batch() (shots on the vQPU). Falls through to
+    // `fallback_` when no vQPU was found.
+    bool run_native_vqa(const Circuit& ansatz, const Observable& obs,
+                        const VQAOptions& options,
+                        std::vector<double>& theta, VQAResult& result) override;
+
 private:
     struct QpuHandle;   // registry entry + open ZMQ DEALER socket, in the .cpp
     struct SampleResult { std::vector<unsigned long long> outcomes; };

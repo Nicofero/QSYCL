@@ -61,6 +61,29 @@ public:
     std::vector<double> probabilities() const override;
     std::vector<unsigned long long> sample(
         const std::vector<std::size_t>& qubits, std::size_t shots) override;
+
+    // get_state()/expectation() stay unsupported on a real device (see
+    // get_state() above), so the default Backend::expectation_batch --
+    // which calls expectation() -- won't work here either. This override
+    // replaces it with a shot-based estimate (quantum/shot_expectation.hpp)
+    // built purely from initialize()/apply_gate()/sample(), the same
+    // triplet every subclass already implements via submit_circuit().
+    // Falls through to `fallback_` (with ITS OWN expectation_batch, e.g.
+    // CPUBackend's native batched kernel if one was wired up) exactly like
+    // every other method here does when device_available_ is false.
+    std::vector<double> expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                          const EvalBatch& batch) override;
+
+    // Runs the optimizer's parameter-update math (Adam/GD/SPSA) as SYCL
+    // kernels on options.optimizer_device, while circuits still go through
+    // THIS backend's own expectation_batch() above -- i.e. shots on the
+    // real device (or the fallback_'s own run_native_vqa, if it has one,
+    // when no device is available). See quantum/native_vqa.hpp's
+    // Backend-overload of run_native_vqa for how the two are decoupled.
+    bool run_native_vqa(const Circuit& ansatz, const Observable& obs,
+                        const VQAOptions& options,
+                        std::vector<double>& theta, VQAResult& result) override;
+
     // device_name() is left pure virtual: every backend must say what
     // it actually is (and, by convention established in CUNQABackend,
     // reflect fallback state too -- see cunqa_backend.cpp for the

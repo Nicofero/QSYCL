@@ -1,4 +1,7 @@
 #include "qpu_backend.hpp"
+#include "quantum/shot_expectation.hpp"
+#include "quantum/native_vqa.hpp"
+#include "quantum/device_selector.hpp"
 
 #include <stdexcept>
 
@@ -76,6 +79,32 @@ std::vector<unsigned long long> QPUBackend::sample(
         }
         throw; // device still considered available -- surface the real error
     }
+}
+
+std::vector<double> QPUBackend::expectation_batch(const Circuit& ansatz, const Observable& obs,
+                                                   const EvalBatch& batch) {
+    if (!device_available_) {
+        return fallback_->expectation_batch(ansatz, obs, batch);
+    }
+    // NOTE: unlike sample(), this does not catch submit_circuit() failures
+    // and fall back mid-batch -- a VQA run that lost the device partway
+    // through should fail loudly rather than silently mix real-hardware
+    // and simulated energies into one optimization trajectory. A plain
+    // sample() call elsewhere in the same run will still trigger the
+    // normal recheck_device()/fallback path for subsequent calls.
+    return native::shot_based_expectation_batch(*this, ansatz, obs, batch, batch.shots);
+}
+
+bool QPUBackend::run_native_vqa(const Circuit& ansatz, const Observable& obs,
+                                const VQAOptions& options,
+                                std::vector<double>& theta, VQAResult& result) {
+    if (!device_available_) {
+        return fallback_->run_native_vqa(ansatz, obs, options, theta, result);
+    }
+    // Circuits: this->expectation_batch() (shots on the real device).
+    // Optimizer arithmetic: SYCL kernels on whatever options.optimizer_device names.
+    sycl::queue optimizer_q = DeviceSelector::make_queue(options.optimizer_device);
+    return native::run_native_vqa(*this, optimizer_q, ansatz, obs, options, theta, result);
 }
 
 } // namespace backends

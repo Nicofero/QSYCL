@@ -1,5 +1,7 @@
 #include "cunqa_backend.hpp"
 #include "quantum/shot_expectation.hpp"
+#include "quantum/native_vqa.hpp"
+#include "quantum/device_selector.hpp"
 
 #include <zmq.hpp>
 #include <nlohmann/json.hpp>
@@ -414,6 +416,16 @@ std::vector<double> CUNQABackend::expectation_batch(const Circuit& ansatz, const
     // exception, same as it would from a bare sample() call that nothing
     // downstream caught.
     return native::shot_based_expectation_batch(*this, ansatz, obs, batch, batch.shots);
+}
+
+bool CUNQABackend::run_native_vqa(const Circuit& ansatz, const Observable& obs,
+                                  const VQAOptions& options,
+                                  std::vector<double>& theta, VQAResult& result) {
+    if (!using_cunqa_) {
+        return fallback_->run_native_vqa(ansatz, obs, options, theta, result);
+    }
+    sycl::queue optimizer_q = DeviceSelector::make_queue(options.optimizer_device);
+    return native::run_native_vqa(*this, optimizer_q, ansatz, obs, options, theta, result);
 }
 
 } // namespace backends
