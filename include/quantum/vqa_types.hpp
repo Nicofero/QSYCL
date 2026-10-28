@@ -28,7 +28,7 @@ struct VQAOptions {
 
     std::size_t max_iterations = 200;
     double tolerance = 1e-9;   // stop when |E_k - E_{k-1}| < tolerance
-    unsigned long long seed = 12345;
+    unsigned long long seed = 42;
 
     // If true, VQA first asks the backend to run the whole optimization
     // natively (on its own device). Backends that don't implement that hook

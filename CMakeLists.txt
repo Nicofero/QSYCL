@@ -36,6 +36,9 @@ add_library(quantum_core
     src/gradient_utils.cpp
     src/native_vqa.cpp
     src/shot_expectation.cpp
+    src/algorithms/ansatz.cpp
+    src/algorithms/hamiltonians.cpp
+    src/algorithms/algorithms.cpp
 )
 target_include_directories(quantum_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -258,11 +261,29 @@ target_link_libraries(bell_state PRIVATE quantum_core)
 add_executable(vqe examples/vqe.cpp)
 target_link_libraries(vqe PRIVATE quantum_core)
 
+# --- Examples using the ansatz library and the vqe()/qaoa() drivers ---
+add_executable(vqe_ising examples/vqe_ising.cpp)
+target_link_libraries(vqe_ising PRIVATE quantum_core)
+add_executable(qaoa_maxcut examples/qaoa_maxcut.cpp)
+target_link_libraries(qaoa_maxcut PRIVATE quantum_core)
+
 # --- Tests (host-only logic: Param/bind/Observable/VQA) ---
 option(BUILD_TESTS "Build the unit tests" OFF)
 if(BUILD_TESTS)
     add_executable(test_vqa tests/test_vqa.cpp)
     target_link_libraries(test_vqa PRIVATE quantum_core)
+
+    # SYCL-native kernels vs an independent host simulator. Run it on the
+    # devices you actually use:  ./test_native_vqa [cpu|gpu] [cpu|gpu]
+    add_executable(test_native_vqa tests/test_native_vqa.cpp)
+    target_include_directories(test_native_vqa PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(test_native_vqa PRIVATE quantum_core)
+
+    # Ansatz library, Hamiltonian builders, vqe()/qaoa(). Works on any backend:
+    #   ./test_algorithms [cpu|gpu]      (no argument = host reference backend)
+    add_executable(test_algorithms tests/test_algorithms.cpp)
+    target_include_directories(test_algorithms PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(test_algorithms PRIVATE quantum_core)
 endif()
 
 # --- Example CUNQA ---

@@ -160,6 +160,7 @@ std::vector<double> expectation_batch(sycl::queue& q, const Circuit& ansatz,
         if (!batch.shift_op.empty()) sop[b] = batch.shift_op[b];
         if (!batch.shift.empty())    sval[b] = batch.shift[b];
     }
+    if (P) eq.memcpy(theta_dev, batch.thetas.data(), B * P * sizeof(double));
     eq.memcpy(shift_op_dev, sop.data(), B * sizeof(int));
     eq.memcpy(shift_dev, sval.data(), B * sizeof(double));
     if (T) eq.memcpy(mask_dev, masks.data(), T * sizeof(PauliMask));
