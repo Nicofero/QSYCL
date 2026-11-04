@@ -36,9 +36,6 @@ add_library(quantum_core
     src/gradient_utils.cpp
     src/native_vqa.cpp
     src/shot_expectation.cpp
-    src/algorithms/ansatz.cpp
-    src/algorithms/hamiltonians.cpp
-    src/algorithms/algorithms.cpp
 )
 target_include_directories(quantum_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -55,6 +52,19 @@ endif()
 if(ENABLE_QPU_BACKEND)
     target_compile_definitions(quantum_core PRIVATE QUANTUM_ENABLE_QPU)
 endif()
+
+# --- Algorithms library: ansatzes, Hamiltonian builders, vqe()/qaoa() ---
+# Built on top of quantum_core only (Circuit/Observable/VQA); backends are
+# reached through the runtime, so this does not depend on any backend target.
+add_library(quantum_algorithms
+    src/algorithms/ansatz.cpp
+    src/algorithms/hamiltonians.cpp
+    src/algorithms/algorithms.cpp
+)
+target_include_directories(quantum_algorithms PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(quantum_algorithms PUBLIC quantum_core)
 
 # --- CPU backend ---
 add_library(quantum_backend_cpu
@@ -263,9 +273,17 @@ target_link_libraries(vqe PRIVATE quantum_core)
 
 # --- Examples using the ansatz library and the vqe()/qaoa() drivers ---
 add_executable(vqe_ising examples/vqe_ising.cpp)
-target_link_libraries(vqe_ising PRIVATE quantum_core)
+target_link_libraries(vqe_ising PRIVATE quantum_algorithms)
 add_executable(qaoa_maxcut examples/qaoa_maxcut.cpp)
-target_link_libraries(qaoa_maxcut PRIVATE quantum_core)
+target_link_libraries(qaoa_maxcut PRIVATE quantum_algorithms)
+
+# Native vs host-loop timing sweep: ./bench_native [circuit_dev] [optimizer_dev] [min_q] [max_q] [iters] [reps]
+add_executable(bench_native examples/bench_native.cpp)
+target_link_libraries(bench_native PRIVATE quantum_algorithms)
+
+# Native vs host-loop timing sweep: ./bench_native [circuit_dev] [optimizer_dev] [min_q] [max_q] [iters] [reps]
+add_executable(bench_cunqa examples/bench_cunqa.cpp)
+target_link_libraries(bench_cunqa PRIVATE quantum_algorithms)
 
 # --- Tests (host-only logic: Param/bind/Observable/VQA) ---
 option(BUILD_TESTS "Build the unit tests" OFF)
@@ -283,7 +301,7 @@ if(BUILD_TESTS)
     #   ./test_algorithms [cpu|gpu]      (no argument = host reference backend)
     add_executable(test_algorithms tests/test_algorithms.cpp)
     target_include_directories(test_algorithms PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-    target_link_libraries(test_algorithms PRIVATE quantum_core)
+    target_link_libraries(test_algorithms PRIVATE quantum_algorithms)
 endif()
 
 # --- Example CUNQA ---

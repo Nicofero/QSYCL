@@ -14,12 +14,11 @@ int main() {
     // Energy of a bitstring == -(cut value), so minimizing the energy maximizes the cut.
     const Observable cost = hamiltonians::maxcut(n, edges);
 
-    QuantumRuntime runtime(DeviceType::CUNQA);
+    QuantumRuntime runtime(DeviceType::CPU);
     std::cout << "Running on: " << runtime.device_name() << "\n";
 
     QAOAOptions opt;
     opt.p = 3;                       // QAOA depth: 2p parameters [gamma_0, beta_0, gamma_1, ...]
-    opt.restarts = 1;                // restart 0 uses the linear-ramp start, the rest are random
     opt.vqa.optimizer = OptimizerKind::Adam;
     opt.vqa.learning_rate = 0.05;
     opt.vqa.max_iterations = 300;
