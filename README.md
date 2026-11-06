@@ -121,8 +121,8 @@ The resulting `qsycl.sif` image contains the required environment, dependencies,
 
 - [ ] Additional simulator backends beyond the current state-vector CPU/GPU implementations.
 - [ ] Additional QPU hardware behind the existing abstract QPU interface, alongside QMIO.
-- [ ] Native execution of variational quantum algorithms (VQAs) within the SYCL execution model.
-- [ ] Gate fusion / circuit optimization passes ahead of execution, by using a backend (first idea)
+- [ ] Extensive benchmarking.
+- [ ] Gate fusion / circuit optimization passes ahead of execution.
 
 ## License
 
