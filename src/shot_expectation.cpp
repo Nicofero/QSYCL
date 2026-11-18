@@ -56,49 +56,66 @@ std::vector<std::vector<std::size_t>> group_qwc(const Observable& obs) {
     return groups;
 }
 
-double shot_based_expectation(Backend& backend, const Circuit& ansatz,
-                              const std::vector<double>& theta, int shift_op, double shift,
-                              const Observable& obs, std::size_t shots) {
-    const auto groups = group_qwc(obs);
+std::vector<MeasurementGroup> measurement_groups(const Observable& obs) {
     const auto& masks = obs.masks();
-    const std::size_t n = ansatz.num_qubits();
-    double total = 0.0;
-
-    for (const auto& group : groups) {
+    std::vector<MeasurementGroup> out;
+    for (auto& terms : group_qwc(obs)) {
         // Every term in a QWC group agrees on each qubit's basis by
         // construction, so OR-ing is safe: it just finds which qubits need
         // which single rotation for the whole group.
-        std::uint64_t needs_x = 0, needs_y = 0;
-        for (auto t : group) {
+        MeasurementGroup g;
+        for (auto t : terms) {
             const auto& m = masks[t];
-            needs_y |= (m.x & m.z);
-            needs_x |= (m.x & ~m.z);
+            g.needs_y |= (m.x & m.z);
+            g.needs_x |= (m.x & ~m.z);
         }
+        g.terms = std::move(terms);
+        out.push_back(std::move(g));
+    }
+    return out;
+}
 
-        // Rebuild+rebind from scratch for each group (not just reuse a
-        // single buffered circuit): a real/remote device executes and
-        // measures a circuit as one atomic unit, so trying a second basis
-        // means submitting a second, independently complete circuit.
-        Circuit bound = ansatz.bind(theta, shift_op, shift);
-        for (std::size_t q = 0; q < n; ++q) {
-            if ((needs_y >> q) & 1ULL) bound.sdg(q).h(q);       // Y -> computational basis
-            else if ((needs_x >> q) & 1ULL) bound.h(q);          // X -> computational basis
-        }                                                        // Z (or I): no rotation needed
+Circuit measurement_circuit(const Circuit& ansatz, const std::vector<double>& theta,
+                            int shift_op, double shift, const MeasurementGroup& group) {
+    // Rebuild+rebind from scratch for each group (not just reuse a single
+    // buffered circuit): a real/remote device executes and measures a
+    // circuit as one atomic unit, so trying a second basis means submitting
+    // a second, independently complete circuit.
+    Circuit bound = ansatz.bind(theta, shift_op, shift);
+    for (std::size_t q = 0; q < ansatz.num_qubits(); ++q) {
+        if ((group.needs_y >> q) & 1ULL) bound.sdg(q).h(q);       // Y -> computational basis
+        else if ((group.needs_x >> q) & 1ULL) bound.h(q);          // X -> computational basis
+    }                                                              // Z (or I): no rotation needed
+    return bound;
+}
 
+double group_contribution(const Observable& obs, const MeasurementGroup& group,
+                          const std::vector<unsigned long long>& outcomes) {
+    if (outcomes.empty()) return 0.0; // nothing to estimate from (shots == 0)
+    const auto& masks = obs.masks();
+    double total = 0.0;
+    for (auto t : group.terms) {
+        const auto& m = masks[t];
+        const unsigned long long contributing = m.x | m.z;
+        long long sum_sign = 0;
+        for (auto outcome : outcomes) {
+            sum_sign += (popcount64(outcome & contributing) & 1) ? -1 : 1;
+        }
+        total += m.coeff * (static_cast<double>(sum_sign) / static_cast<double>(outcomes.size()));
+    }
+    return total;
+}
+
+double shot_based_expectation(Backend& backend, const Circuit& ansatz,
+                              const std::vector<double>& theta, int shift_op, double shift,
+                              const Observable& obs, std::size_t shots) {
+    const std::size_t n = ansatz.num_qubits();
+    double total = 0.0;
+    for (const auto& group : measurement_groups(obs)) {
+        const Circuit bound = measurement_circuit(ansatz, theta, shift_op, shift, group);
         backend.initialize(n);
         for (const auto& op : bound.operations()) backend.apply_gate(op);
-        const auto outcomes = backend.sample({}, shots); // {} = every qubit
-        if (outcomes.empty()) continue; // nothing to estimate from (shots == 0)
-
-        for (auto t : group) {
-            const auto& m = masks[t];
-            const unsigned long long contributing = m.x | m.z;
-            long long sum_sign = 0;
-            for (auto outcome : outcomes) {
-                sum_sign += (popcount64(outcome & contributing) & 1) ? -1 : 1;
-            }
-            total += m.coeff * (static_cast<double>(sum_sign) / static_cast<double>(outcomes.size()));
-        }
+        total += group_contribution(obs, group, backend.sample({}, shots)); // {} = every qubit
     }
     return total;
 }

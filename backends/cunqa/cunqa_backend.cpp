@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <deque>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
@@ -61,7 +63,7 @@ struct QpuRegistryEntry {
 // TCP/ZMQ endpoint regardless of where they're running, so a
 // co-location check would only needlessly exclude perfectly reachable
 // QPUs on other nodes.
-std::vector<QpuRegistryEntry> discover_qpus() {
+std::vector<QpuRegistryEntry> read_registry() {
     std::ifstream file(cunqa_registry_path());
     if (!file) {
         return {};
@@ -191,61 +193,224 @@ std::vector<GateOp> deconstruct_gate(const GateOp& op) {
     };
 }
 
+// Serializes one circuit (gates + an explicit measure per qubit in
+// `measured`) into cunqa's task JSON for a vQPU with registry `device`.
+std::string build_task(const std::vector<GateOp>& gates, std::size_t num_qubits,
+                       const std::vector<std::size_t>& measured, std::size_t shots,
+                       const json& device) {
+    // Buffered gates, then one explicit measure per requested qubit --
+    // cunqa's CunqaCircuit::measure(qubit, clbit) supports arbitrary
+    // subsets directly, so no marginalization needed. Any MEASURE ops
+    // already in the circuit are dropped: the measurements are fully
+    // described by `measured`.
+    // CONFIRMED against a real client dump: "qubits"/"clbits" are
+    // single-element arrays here too, and there's no "save" key.
+    json instructions = json::array();
+    for (const auto& op : gates) {
+        if (op.type == GateType::MEASURE) continue;
+        for (const auto& decomposed_op : deconstruct_gate(op)) {    // Atomic deconstruction of gates
+            instructions.push_back(gate_to_instruction(decomposed_op));
+        }
+    }
+    for (std::size_t clbit = 0; clbit < measured.size(); ++clbit) {
+        instructions.push_back({
+            {"name", "measure"},
+            {"qubits", json::array({measured[clbit]})},
+            {"clbits", json::array({clbit})}
+        });
+    }
+
+    // CONFIRMED structure against a real client dump: "sending_to",
+    // "is_dynamic" and "id" are top-level siblings of "config" and
+    // "instructions", NOT nested inside "config" -- and there is no
+    // "qpu_id" field at all (this deployment's no_comm backend doesn't
+    // need it; the ZMQ endpoint alone identifies the target vQPU).
+    // "num_qubits" is a plain scalar (total qubit count), not the
+    // [data, comm] pair the main-branch source suggested.
+    json task;
+    task["config"] = {
+        {"shots", shots},
+        {"method", "automatic"},
+        {"avoid_parallelization", false},
+        {"num_clbits", measured.size()},
+        {"num_qubits", num_qubits},
+        {"device", device}
+    };
+    task["instructions"] = instructions;
+    task["sending_to"] = json::array();
+    task["is_dynamic"] = false;
+    task["id"] = generate_circuit_id();
+    return task.dump();
+}
+
+// A vQPU answered, but with an error about the circuit itself. Retrying
+// the same circuit on another vQPU would fail the same way, so the
+// dispatcher propagates this one instead of dropping the vQPU.
+struct VqpuReportedError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// Parses a vQPU reply into one outcome (bitstring-as-int) per shot.
+std::vector<unsigned long long> parse_reply(const std::string& response_str,
+                                            std::size_t shots) {
+    json response = json::parse(response_str);
+
+    if (response.contains("ERROR")) {
+        throw VqpuReportedError(
+            "CUNQABackend: vQPU reported an error: " +
+            response.at("ERROR").get<std::string>());
+    }
+
+    // Aer nests counts under results[0].data.counts; cunqa/Munich-style
+    // simulators put counts directly at the top level (mirrors
+    // cunqa.result.Result.counts's own branching logic).
+    json counts_json;
+    if (response.contains("results")) {
+        counts_json = response.at("results").at(0).at("data").at("counts");
+    } else if (response.contains("counts")) {
+        counts_json = response.at("counts");
+    } else {
+        throw std::runtime_error(
+            "CUNQABackend: unrecognized result format from vQPU (no "
+            "'results' or 'counts' key)");
+    }
+
+    std::vector<unsigned long long> outcomes;
+    outcomes.reserve(shots);
+    for (auto& [bitstring, count] : counts_json.items()) {
+        unsigned long long value = std::stoull(bitstring, nullptr, 2);
+        std::size_t n = count.get<std::size_t>();
+        for (std::size_t i = 0; i < n; ++i) {
+            outcomes.push_back(value);
+        }
+    }
+    return outcomes;
+}
+
+void send_string(zmq::socket_t& socket, const std::string& payload) {
+    zmq::message_t request(payload.begin(), payload.end());
+    if (!socket.send(request, zmq::send_flags::none)) {
+        throw std::runtime_error("CUNQABackend: could not send circuit to vQPU");
+    }
+}
+
+std::string recv_string(zmq::socket_t& socket) {
+    zmq::message_t reply;
+    auto recv_size = socket.recv(reply, zmq::recv_flags::none);
+    if (!recv_size) {
+        throw std::runtime_error("CUNQABackend: no reply received from vQPU");
+    }
+    return std::string(static_cast<char*>(reply.data()), recv_size.value());
+}
+
+// 0 (the default) = wait for a vQPU's reply indefinitely, matching the
+// single-circuit path. Set it to have the batched dispatcher give up on an
+// unresponsive vQPU and re-queue its circuit on the others.
+std::chrono::milliseconds dispatch_timeout() {
+    const char* v = std::getenv("CUNQA_RECV_TIMEOUT_MS");
+    if (!v) return std::chrono::milliseconds(0);
+    try {
+        return std::chrono::milliseconds(std::stoll(v));
+    } catch (...) {
+        return std::chrono::milliseconds(0);
+    }
+}
+
 } // namespace
 
 struct CUNQABackend::QpuHandle {
     QpuRegistryEntry entry;
-    zmq::context_t context{1};
-    zmq::socket_t socket{context, zmq::socket_type::dealer};
+    zmq::context_t& context;
+    zmq::socket_t socket;
+    bool healthy = true; // false once a submission to it has failed
 
-    explicit QpuHandle(QpuRegistryEntry e) : entry(std::move(e)) {
+    QpuHandle(zmq::context_t& ctx, QpuRegistryEntry e)
+        : entry(std::move(e)), context(ctx) {
+        reconnect();
+    }
+
+    // Replaces the socket with a fresh one (new ZMQ identity). Any reply
+    // still owed to the old socket is then discarded by the vQPU's ROUTER
+    // instead of being read later as the answer to a different circuit.
+    void reconnect() {
+        socket = zmq::socket_t(context, zmq::socket_type::dealer);
+        // Don't block destruction on unsent/unanswered messages to a vQPU
+        // that has gone away.
+        socket.set(zmq::sockopt::linger, 0);
         socket.connect(entry.endpoint);
     }
 };
 
+struct CUNQABackend::QpuPool {
+    zmq::context_t context{1};
+    // Declared after `context`, so every socket is closed before the
+    // context is terminated.
+    std::vector<std::unique_ptr<QpuHandle>> qpus;
+};
+
 CUNQABackend::CUNQABackend()
     : fallback_(std::make_unique<CPUBackend>()) {
-    discover_qpu();
+    discover_qpus();
 }
 
 CUNQABackend::~CUNQABackend() = default;
 
-void CUNQABackend::discover_qpu() {
+void CUNQABackend::discover_qpus() {
+    pool_.reset();
+    using_cunqa_ = false;
     try {
-        auto candidates = discover_qpus();
+        auto candidates = read_registry();
         if (candidates.empty()) {
-            using_cunqa_ = false;
-            qpu_.reset();
             std::cerr << "[CUNQABackend] no qraised QPU found in "
                       << cunqa_registry_path()
                       << ", falling back to CPU backend\n";
             return;
         }
-        // ASSUMED: taking the first available match is good enough --
-        // add real selection logic (least loaded, matching family, etc.)
-        // once you have more than one raised vQPU to choose between.
-        qpu_ = std::make_unique<QpuHandle>(candidates.front());
+        auto pool = std::make_unique<QpuPool>();
+        for (auto& entry : candidates) {
+            pool->qpus.push_back(std::make_unique<QpuHandle>(pool->context, std::move(entry)));
+        }
+        pool_ = std::move(pool);
+        next_qpu_ = 0;
         using_cunqa_ = true;
     } catch (const std::exception& e) {
+        pool_.reset();
         using_cunqa_ = false;
-        qpu_.reset();
         std::cerr << "[CUNQABackend] QPU discovery failed (" << e.what()
                   << "), falling back to CPU backend\n";
     }
 }
 
+std::vector<CUNQABackend::QpuHandle*> CUNQABackend::eligible_qpus(std::size_t n) const {
+    std::vector<QpuHandle*> out;
+    if (!pool_) return out;
+    for (auto& q : pool_->qpus) {
+        if (q->healthy && q->entry.max_qubits >= n) out.push_back(q.get());
+    }
+    return out;
+}
+
+std::size_t CUNQABackend::num_vqpus() const {
+    if (!pool_) return 0;
+    std::size_t n = 0;
+    for (auto& q : pool_->qpus) n += q->healthy ? 1 : 0;
+    return n;
+}
+
 void CUNQABackend::initialize(std::size_t num_qubits) {
     num_qubits_ = num_qubits;
     gate_buffer_.clear();
-    // Deliberately not re-running discover_qpu() here -- circuit-buffer
+    // Deliberately not re-running discover_qpus() here -- circuit-buffer
     // lifecycle and QPU discovery are on separate cadences (see header).
     if (!using_cunqa_) {
         fallback_->initialize(num_qubits);
-    } else if (qpu_ && num_qubits > qpu_->entry.max_qubits) {
+    } else if (eligible_qpus(num_qubits).empty()) {
+        std::size_t largest = 0;
+        for (auto& q : pool_->qpus) largest = std::max(largest, q->entry.max_qubits);
         throw std::runtime_error(
             "CUNQABackend: circuit needs " + std::to_string(num_qubits) +
-            " qubits but the discovered vQPU only supports " +
-            std::to_string(qpu_->entry.max_qubits));
+            " qubits but the largest available vQPU only supports " +
+            std::to_string(largest));
     }
 }
 
@@ -283,29 +448,50 @@ std::vector<unsigned long long> CUNQABackend::sample(
         return fallback_->sample(qubits, shots);
     }
 
-    SampleResult result;
-    try {
-        result = run_on_cunqa(qubits, shots);
-    } catch (const std::exception& e) {
-        // Submission failed at run time -- e.g. the qraised allocation's
-        // time box expired mid-session. Re-probe once, then fall back
-        // if the QPU is really gone, replaying the buffered circuit.
-        std::cerr << "[CUNQABackend] cunqa submission failed (" << e.what()
-                  << "), re-checking QPU availability\n";
-        discover_qpu();
-        if (!using_cunqa_) {
-            fallback_->initialize(num_qubits_);
-            for (const auto& op : gate_buffer_) {
-                fallback_->apply_gate(op);
-            }
-            return fallback_->sample(qubits, shots);
-        }
-        result = run_on_cunqa(qubits, shots);
+    auto pick = [&]() -> QpuHandle* {
+        auto eligible = eligible_qpus(num_qubits_);
+        if (eligible.empty()) return nullptr;
+        return eligible[next_qpu_++ % eligible.size()];
+    };
+
+    QpuHandle* qpu = pick();
+    if (!qpu) {
+        throw std::runtime_error(
+            "CUNQABackend: no healthy vQPU can run a " + std::to_string(num_qubits_) +
+            "-qubit circuit");
     }
-    return result.outcomes;
+    try {
+        return run_on_cunqa(*qpu, gate_buffer_, qubits, shots);
+    } catch (const VqpuReportedError&) {
+        throw; // the circuit is at fault, not the vQPU
+    } catch (const std::exception& e) {
+        // Submission failed at run time -- e.g. the qraised
+        // allocation's time box expired mid-session.
+        std::cerr << "[CUNQABackend] cunqa submission to vQPU '" << qpu->entry.id
+                  << "' failed (" << e.what() << "), re-checking QPU availability\n";
+    }
+
+    // Re-probe once, then fall back if no vQPU is really left, replaying
+    // the buffered circuit.
+    discover_qpus();
+    if (!using_cunqa_) {
+        fallback_->initialize(num_qubits_);
+        for (const auto& op : gate_buffer_) {
+            fallback_->apply_gate(op);
+        }
+        return fallback_->sample(qubits, shots);
+    }
+    qpu = pick();
+    if (!qpu) {
+        throw std::runtime_error(
+            "CUNQABackend: no rediscovered vQPU can run a " + std::to_string(num_qubits_) +
+            "-qubit circuit");
+    }
+    return run_on_cunqa(*qpu, gate_buffer_, qubits, shots);
 }
 
-CUNQABackend::SampleResult CUNQABackend::run_on_cunqa(
+std::vector<unsigned long long> CUNQABackend::run_on_cunqa(
+    QpuHandle& qpu, const std::vector<GateOp>& gates,
     const std::vector<std::size_t>& qubits, std::size_t shots) {
 
     std::vector<std::size_t> measured = qubits;
@@ -314,93 +500,131 @@ CUNQABackend::SampleResult CUNQABackend::run_on_cunqa(
         for (std::size_t i = 0; i < num_qubits_; ++i) measured[i] = i;
     }
 
-    // Build instructions: buffered gates, then one explicit measure per
-    // requested qubit -- cunqa's CunqaCircuit::measure(qubit, clbit)
-    // supports arbitrary subsets directly, so no marginalization needed.
-    // CONFIRMED against a real client dump: "qubits"/"clbits" are
-    // single-element arrays here too, and there's no "save" key.
-    json instructions = json::array();
-    for (const auto& op : gate_buffer_) {
-        for (const auto& decomposed_op : deconstruct_gate(op)) {    // Atomic deconstruction of gates
-            instructions.push_back(gate_to_instruction(decomposed_op));
-        }
-    }
-    for (std::size_t clbit = 0; clbit < measured.size(); ++clbit) {
-        instructions.push_back({
-            {"name", "measure"},
-            {"qubits", json::array({measured[clbit]})},
-            {"clbits", json::array({clbit})}
-        });
-    }
+    send_string(qpu.socket, build_task(gates, num_qubits_, measured, shots, qpu.entry.device));
+    return parse_reply(recv_string(qpu.socket), shots);
+}
 
-    // CONFIRMED structure against a real client dump: "sending_to",
-    // "is_dynamic" and "id" are top-level siblings of "config" and
-    // "instructions", NOT nested inside "config" -- and there is no
-    // "qpu_id" field at all (this deployment's no_comm backend doesn't
-    // need it; the ZMQ endpoint alone identifies the target vQPU).
-    // "num_qubits" is a plain scalar (total qubit count), not the
-    // [data, comm] pair the main-branch source suggested.
-    json task;
-    task["config"] = {
-        {"shots", shots},
-        {"method", "automatic"},
-        {"avoid_parallelization", false},
-        {"num_clbits", measured.size()},
-        {"num_qubits", num_qubits_},
-        {"device", qpu_->entry.device}
+std::vector<std::vector<unsigned long long>> CUNQABackend::dispatch(
+    const std::vector<Circuit>& circuits, std::size_t shots) {
+    using clock = std::chrono::steady_clock;
+
+    std::vector<std::vector<unsigned long long>> results(circuits.size());
+    if (circuits.empty()) return results;
+
+    const std::size_t n = circuits.front().num_qubits();
+    std::vector<std::size_t> all_qubits(n);
+    for (std::size_t q = 0; q < n; ++q) all_qubits[q] = q;
+
+    const auto timeout = dispatch_timeout();
+
+    // Circuits not yet handed to any vQPU. A circuit taken back from a
+    // vQPU that failed goes to the front, so it isn't starved.
+    std::deque<std::size_t> pending;
+    for (std::size_t i = 0; i < circuits.size(); ++i) pending.push_back(i);
+
+    struct Worker {
+        QpuHandle* qpu;
+        long job = -1;              // circuit index in flight, -1 = idle
+        clock::time_point sent_at;
     };
-    task["instructions"] = instructions;
-    task["sending_to"] = json::array();
-    task["is_dynamic"] = false;
-    task["id"] = generate_circuit_id();
+    std::vector<Worker> workers;
+    for (QpuHandle* q : eligible_qpus(n)) workers.push_back(Worker{q, -1, clock::time_point{}});
 
-    const std::string task_str = task.dump();
-    zmq::message_t request(task_str.begin(), task_str.end());
-    qpu_->socket.send(request, zmq::send_flags::none);
+    auto drop = [&](Worker& w, const std::string& why) {
+        std::cerr << "[CUNQABackend] dropping vQPU '" << w.qpu->entry.id << "' (" << why
+                  << ")" << (w.job >= 0 ? ", re-queueing its circuit" : "") << "\n";
+        w.qpu->healthy = false;
+        if (w.job >= 0) pending.push_front(static_cast<std::size_t>(w.job));
+        w.job = -1;
+    };
 
-    zmq::message_t reply;
-    auto recv_size = qpu_->socket.recv(reply, zmq::recv_flags::none);
-    if (!recv_size) {
-        throw std::runtime_error("CUNQABackend: no reply received from vQPU");
-    }
-    std::string response_str(static_cast<char*>(reply.data()), recv_size.value());
-    json response = json::parse(response_str);
+    std::size_t done = 0;
+    try {
+        while (done < circuits.size()) {
+            // Keep every healthy, idle vQPU busy.
+            for (auto& w : workers) {
+                if (!w.qpu->healthy || w.job >= 0 || pending.empty()) continue;
+                const std::size_t job = pending.front();
+                pending.pop_front();
+                w.job = static_cast<long>(job);
+                try {
+                    send_string(w.qpu->socket, build_task(circuits[job].operations(), n,
+                                                          all_qubits, shots, w.qpu->entry.device));
+                    w.sent_at = clock::now();
+                } catch (const std::exception& e) {
+                    drop(w, e.what());
+                }
+            }
 
-    if (response.contains("ERROR")) {
-        throw std::runtime_error(
-            "CUNQABackend: vQPU reported an error: " +
-            response.at("ERROR").get<std::string>());
-    }
+            std::vector<zmq::pollitem_t> items;
+            std::vector<Worker*> busy;
+            for (auto& w : workers) {
+                if (w.job < 0) continue;
+                items.push_back({w.qpu->socket.handle(), 0, ZMQ_POLLIN, 0});
+                busy.push_back(&w);
+            }
+            if (busy.empty()) {
+                if (!pending.empty()) {
+                    throw std::runtime_error(
+                        "CUNQABackend: every vQPU able to run a " + std::to_string(n) +
+                        "-qubit circuit has failed; " + std::to_string(circuits.size() - done) +
+                        " circuit(s) of this batch could not be run");
+                }
+                break;
+            }
 
-    // Aer nests counts under results[0].data.counts; cunqa/Munich-style
-    // simulators put counts directly at the top level (mirrors
-    // cunqa.result.Result.counts's own branching logic).
-    json counts_json;
-    if (response.contains("results")) {
-        counts_json = response.at("results").at(0).at("data").at("counts");
-    } else if (response.contains("counts")) {
-        counts_json = response.at("counts");
-    } else {
-        throw std::runtime_error(
-            "CUNQABackend: unrecognized result format from vQPU (no "
-            "'results' or 'counts' key)");
-    }
+            // Wait for the first reply, or for the earliest in-flight circuit
+            // to hit the timeout (if one is configured).
+            std::chrono::milliseconds wait(-1);
+            if (timeout.count() > 0) {
+                auto earliest = busy.front()->sent_at;
+                for (auto* w : busy) earliest = std::min(earliest, w->sent_at);
+                wait = std::max(std::chrono::milliseconds(0),
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    earliest + timeout - clock::now()));
+            }
+            zmq::poll(items, wait);
 
-    SampleResult out;
-    out.outcomes.reserve(shots);
-    for (auto& [bitstring, count] : counts_json.items()) {
-        unsigned long long value = std::stoull(bitstring, nullptr, 2);
-        std::size_t n = count.get<std::size_t>();
-        for (std::size_t i = 0; i < n; ++i) {
-            out.outcomes.push_back(value);
+            for (std::size_t k = 0; k < busy.size(); ++k) {
+                Worker& w = *busy[k];
+                if (items[k].revents & ZMQ_POLLIN) {
+                    std::string reply;
+                    try {
+                        reply = recv_string(w.qpu->socket);
+                    } catch (const std::exception& e) {
+                        drop(w, e.what());
+                        continue;
+                    }
+                    // A VqpuReportedError (or a malformed reply) propagates:
+                    // it is about the circuit/protocol, not this vQPU.
+                    results[static_cast<std::size_t>(w.job)] = parse_reply(reply, shots);
+                    w.job = -1;
+                    ++done;
+                } else if (timeout.count() > 0 && clock::now() - w.sent_at >= timeout) {
+                    drop(w, "no reply within " + std::to_string(timeout.count()) + " ms");
+                }
+            }
         }
+    } catch (...) {
+        // Aborting with circuits still in flight: their replies would sit in
+        // those sockets and be read later as the answer to a different
+        // circuit. Give those vQPUs fresh sockets so the replies are dropped.
+        for (auto& w : workers) {
+            if (w.job >= 0 && w.qpu->healthy) w.qpu->reconnect();
+        }
+        throw;
     }
-    return out;
+    return results;
 }
 
 std::string CUNQABackend::device_name() const {
     if (using_cunqa_) {
-        return "CUNQA (vQPU: " + qpu_->entry.id + ")";
+        std::string ids;
+        for (auto& q : pool_->qpus) {
+            if (!q->healthy) continue;
+            ids += (ids.empty() ? "" : ", ") + q->entry.id;
+        }
+        return "CUNQA (" + std::to_string(num_vqpus()) + " vQPU(s): " + ids + ")";
     }
     return "CUNQA (fallback: " + fallback_->device_name() + ")";
 }
@@ -410,12 +634,56 @@ std::vector<double> CUNQABackend::expectation_batch(const Circuit& ansatz, const
     if (!using_cunqa_) {
         return fallback_->expectation_batch(ansatz, obs, batch);
     }
-    // See QPUBackend::expectation_batch's note: deliberately doesn't catch
-    // a mid-batch submission failure and silently switch some rows to the
-    // fallback -- a run_on_cunqa() failure here surfaces as a real
-    // exception, same as it would from a bare sample() call that nothing
-    // downstream caught.
-    return native::shot_based_expectation_batch(*this, ansatz, obs, batch, batch.shots);
+    if (obs.num_qubits() != ansatz.num_qubits()) {
+        throw std::invalid_argument("CUNQABackend::expectation_batch: observable and ansatz qubit counts differ");
+    }
+    if (batch.count != 0 && batch.num_params != ansatz.num_params()) {
+        throw std::invalid_argument("CUNQABackend::expectation_batch: batch parameter count does not match ansatz");
+    }
+
+    std::vector<double> out(batch.count, 0.0);
+    if (batch.count == 0 || batch.shots == 0) return out;
+
+    const std::size_t n = ansatz.num_qubits();
+    if (eligible_qpus(n).empty()) {
+        // Every vQPU was dropped by an earlier batch (or none was ever big
+        // enough): re-read the registry once -- qraise may have brought new
+        // ones up -- but never switch to the CPU fallback mid-run.
+        discover_qpus();
+        if (eligible_qpus(n).empty()) {
+            throw std::runtime_error(
+                "CUNQABackend: no vQPU available that can run a " + std::to_string(n) +
+                "-qubit circuit");
+        }
+    }
+
+    // Build the whole batch up front -- one complete circuit per (request,
+    // QWC group) -- so it can be spread over every vQPU at once instead of
+    // run one circuit at a time.
+    const auto groups = native::measurement_groups(obs);
+    const std::size_t G = groups.size();
+    std::vector<Circuit> circuits;
+    circuits.reserve(batch.count * G);
+    for (std::size_t i = 0; i < batch.count; ++i) {
+        const int op = batch.shift_op.empty() ? -1 : batch.shift_op[i];
+        const double sh = batch.shift.empty() ? 0.0 : batch.shift[i];
+        const auto theta = batch.theta_of(i);
+        for (const auto& g : groups) {
+            circuits.push_back(native::measurement_circuit(ansatz, theta, op, sh, g));
+        }
+    }
+
+    // Deliberately no CPU fallback from here on: a batch that loses every
+    // vQPU partway through fails loudly rather than silently mixing
+    // emulated and locally simulated energies into one VQA trajectory.
+    const auto outcomes = dispatch(circuits, batch.shots);
+
+    for (std::size_t i = 0; i < batch.count; ++i) {
+        for (std::size_t g = 0; g < G; ++g) {
+            out[i] += native::group_contribution(obs, groups[g], outcomes[i * G + g]);
+        }
+    }
+    return out;
 }
 
 bool CUNQABackend::run_native_vqa(const Circuit& ansatz, const Observable& obs,
