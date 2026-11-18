@@ -10,6 +10,8 @@ a public C++ library, so there's nothing stable to `find_package()` there.
   `DEALER` socket each). Unlike `get_QPUs(co_located=True)`, this isn't restricted to
   same-node vQPUs: we talk to them over a plain ZMQ/TCP endpoint regardless of where
   they're running. vQPUs whose `n_qubits` is smaller than the circuit are skipped.
+  Set `CUNQA_MAX_VQPUS=<k>` to use only the first `k` vQPUs of the registry (sorted by
+  id), e.g. to benchmark scaling with the vQPU count (`0` or unset = all).
 - **`apply_gate()` buffers, it doesn't execute.** Unlike the CPU backend's per-gate
   kernel, CUNQA only runs whole circuits as a unit, so each call just appends to an
   in-memory instruction list.

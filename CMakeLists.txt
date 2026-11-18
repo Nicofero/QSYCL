@@ -285,6 +285,14 @@ target_link_libraries(bench_native PRIVATE quantum_algorithms)
 add_executable(bench_cunqa examples/bench_cunqa.cpp)
 target_link_libraries(bench_cunqa PRIVATE quantum_algorithms)
 
+# General VQE benchmark: every execution method (native / host / sequential) on every
+# built backend, plus a CUNQA vQPU-count sweep. Driven over SLURM by scripts/benchmarking.sh.
+option(BUILD_BENCH "Build the benchmarking executables" OFF)
+if(BUILD_BENCH)
+    add_executable(bench_vqe examples/benchmarking/bench_vqe.cpp)
+    target_link_libraries(bench_vqe PRIVATE quantum_algorithms)
+endif()
+
 # --- Tests (host-only logic: Param/bind/Observable/VQA) ---
 option(BUILD_TESTS "Build the unit tests" OFF)
 if(BUILD_TESTS)

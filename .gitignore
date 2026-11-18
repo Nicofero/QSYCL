@@ -56,3 +56,6 @@ qraise*
 # myfiles
 start_env_note.sh
 TODO
+# benchmark outputs
+results/
+bench_vqe_*.out

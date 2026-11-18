@@ -366,6 +366,17 @@ void CUNQABackend::discover_qpus() {
                       << ", falling back to CPU backend\n";
             return;
         }
+        // Optional cap on how many of the registered vQPUs to use (e.g. to
+        // benchmark scaling with the vQPU count). Registry entries are
+        // iterated in sorted-id order, so the same subset is always chosen.
+        if (const char* cap_env = std::getenv("CUNQA_MAX_VQPUS")) {
+            try {
+                const std::size_t cap = std::stoul(cap_env);
+                if (cap > 0 && candidates.size() > cap) candidates.resize(cap);
+            } catch (...) {
+                std::cerr << "[CUNQABackend] ignoring invalid CUNQA_MAX_VQPUS='" << cap_env << "'\n";
+            }
+        }
         auto pool = std::make_unique<QpuPool>();
         for (auto& entry : candidates) {
             pool->qpus.push_back(std::make_unique<QpuHandle>(pool->context, std::move(entry)));
