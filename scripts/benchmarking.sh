@@ -54,11 +54,17 @@ OPTIMIZERS_GPU="${OPTIMIZERS_GPU:-cpu,gpu}"
 
 # CUNQA: qubit range and the vQPU counts to compare
 CUNQA_MIN_Q="${CUNQA_MIN_Q:-4}"
-CUNQA_MAX_Q="${CUNQA_MAX_Q:-12}"
+CUNQA_MAX_Q="${CUNQA_MAX_Q:-20}"
 CUNQA_STEP_Q="${CUNQA_STEP_Q:-4}"
 CUNQA_VQPUS="${CUNQA_VQPUS:-1 2 4 8}"
 # Raise the vQPUs from this script (1) or use ones already raised (0).
 CUNQA_RAISE="${CUNQA_RAISE:-1}"
+# Every vQPU configuration gets the same total cores, to compare fairly with
+# QSYCL's 64-core CPU runs: k vQPUs are raised with CUNQA_NODE_CORES / k cores
+# each (1 -> 64, 2 -> 32, 4 -> 16, 8 -> 8). Each vQPU count is therefore raised,
+# benchmarked and dropped on its own. Only applies when CUNQA_RAISE=1.
+CUNQA_NODE_CORES="${CUNQA_NODE_CORES:-64}"
+QRAISE_CORES_FLAG="${QRAISE_CORES_FLAG:--c}"   # qraise option for cores per vQPU
 QRAISE_TIME="${QRAISE_TIME:-05:00:00}"
 # Extra qraise flags. --co-located makes the vQPUs reachable over TCP from this
 # job's node. Check them against `qraise --help` for your CUNQA version.
@@ -144,22 +150,54 @@ registered_vqpus() {
     python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$CUNQA_REGISTRY" 2>/dev/null || echo 0
 }
 
+# Cores per vQPU so that k vQPUs together use CUNQA_NODE_CORES.
+cores_per_vqpu() {
+    local k="$1"
+    if (( CUNQA_NODE_CORES % k != 0 )); then
+        echo "warning: $CUNQA_NODE_CORES cores don't split evenly over $k vQPUs, using $(( CUNQA_NODE_CORES / k )) each" >&2
+    fi
+    echo $(( CUNQA_NODE_CORES / k ))
+}
+
+# Waits until the registry is empty, so the next configuration can't pick up
+# vQPUs from the previous one (CUNQA_MAX_VQPUS takes the first k entries).
+wait_registry_empty() {
+    local waited=0
+    while (( $(registered_vqpus) > 0 )); do
+        if (( waited >= QRAISE_WAIT_S )); then
+            echo "error: $(registered_vqpus) vQPU(s) still in $CUNQA_REGISTRY ${QRAISE_WAIT_S}s after qdrop" >&2
+            return 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+}
+
 drop_vqpus() {
     if [[ "$CUNQA_RAISE" == "1" ]]; then
         echo "Dropping the vQPUs raised by this benchmark"
         qdrop --all || true
+        wait_registry_empty
     fi
 }
 
+# raise_vqpus <count>: raises <count> vQPUs with CUNQA_NODE_CORES/<count> cores each.
 raise_vqpus() {
     local wanted="$1"
     if [[ "$CUNQA_RAISE" != "1" ]]; then
         echo "CUNQA_RAISE=0: using the $(registered_vqpus) vQPU(s) already in $CUNQA_REGISTRY"
         return 0
     fi
-    echo "Raising $wanted vQPU(s): qraise -n $wanted -t $QRAISE_TIME $QRAISE_EXTRA"
+    # Start from an empty registry: leftovers would be counted and benchmarked.
+    if (( $(registered_vqpus) > 0 )); then
+        echo "Registry not empty ($(registered_vqpus) vQPU(s)), dropping them first"
+        drop_vqpus || return 1
+    fi
+    local cores
+    cores=$(cores_per_vqpu "$wanted")
+    echo "Raising $wanted vQPU(s) x $cores cores: qraise -n $wanted -t $QRAISE_TIME $QRAISE_CORES_FLAG $cores $QRAISE_EXTRA"
     # shellcheck disable=SC2086
-    qraise -n "$wanted" -t "$QRAISE_TIME" $QRAISE_EXTRA || return 1
+    qraise -n "$wanted" -t "$QRAISE_TIME" $QRAISE_CORES_FLAG "$cores" $QRAISE_EXTRA || return 1
     trap drop_vqpus EXIT
 
     local waited=0
@@ -172,32 +210,52 @@ raise_vqpus() {
         waited=$((waited + 5))
     done
     echo "$(registered_vqpus) vQPU(s) registered after ${waited}s"
+    # Which core split each configuration used, for the analysis.
+    [[ -f "$OUT_DIR/vqpu_cores.csv" ]] || echo "mode,vqpus,cores_per_vqpu,total_cores" > "$OUT_DIR/vqpu_cores.csv"
+    echo "${CUNQA_PHASE:-unknown},$wanted,$cores,$(( wanted * cores ))" >> "$OUT_DIR/vqpu_cores.csv"
+}
+
+# with_vqpus <count> <command...>: raise, run, drop. With CUNQA_RAISE=0 it just runs.
+with_vqpus() {
+    local k="$1"; shift
+    raise_vqpus "$k" || { echo "error: could not raise $k vQPU(s), skipping this configuration" >&2; drop_vqpus; return 1; }
+    "$@"
+    local rc=$?
+    drop_vqpus
+    trap - EXIT
+    return $rc
 }
 
 run_cunqa() {
-    section "CUNQA emulator -- vQPU sweep: $CUNQA_VQPUS"
-    local max_vqpus=0 v
-    for v in $CUNQA_VQPUS; do (( v > max_vqpus )) && max_vqpus=$v; done
-    raise_vqpus "$max_vqpus" || { echo "skipping CUNQA" >&2; return 1; }
+    section "CUNQA emulator -- vQPU sweep: $CUNQA_VQPUS ($CUNQA_NODE_CORES cores in total each)"
+    CUNQA_PHASE=vqe
+    local vqe_args=("${COMMON[@]}" --devices cunqa --optimizers cpu
+                    --min-qubits "$CUNQA_MIN_Q" --max-qubits "$CUNQA_MAX_Q" --step "$CUNQA_STEP_Q"
+                    --csv "$OUT_DIR/cunqa.csv")
+    : > "$OUT_DIR/cunqa.log"
 
-    local vqpu_list
-    vqpu_list=$(echo "$CUNQA_VQPUS" | tr ' ' ',')
+    if [[ "$CUNQA_RAISE" != "1" ]]; then
+        # Pre-raised vQPUs: core split isn't controlled here, sweep them in one go.
+        echo "warning: CUNQA_RAISE=0, cores per vQPU are whatever the existing vQPUs were raised with" >&2
+        "$BIN" "${vqe_args[@]}" --methods native,host --vqpus "$(echo "$CUNQA_VQPUS" | tr ' ' ',')" \
+            2>&1 | tee -a "$OUT_DIR/cunqa.log"
+        "$BIN" "${vqe_args[@]}" --methods sequential --vqpus 1 2>&1 | tee -a "$OUT_DIR/cunqa.log"
+        return
+    fi
 
-    # native + host for every vQPU count: this is where the vQPU count matters.
-    "$BIN" "${COMMON[@]}" --devices cunqa --optimizers cpu \
-        --methods native,host --vqpus "$vqpu_list" \
-        --min-qubits "$CUNQA_MIN_Q" --max-qubits "$CUNQA_MAX_Q" --step "$CUNQA_STEP_Q" \
-        --csv "$OUT_DIR/cunqa.csv" 2>&1 | tee "$OUT_DIR/cunqa.log"
-
-    # Sequential baseline: one blocking circuit at a time, so it can't use more
-    # than one vQPU at once -- run it once rather than per vQPU count.
-    "$BIN" "${COMMON[@]}" --devices cunqa --optimizers cpu \
-        --methods sequential --vqpus 1 \
-        --min-qubits "$CUNQA_MIN_Q" --max-qubits "$CUNQA_MAX_Q" --step "$CUNQA_STEP_Q" \
-        --csv "$OUT_DIR/cunqa.csv" 2>&1 | tee -a "$OUT_DIR/cunqa.log"
-
-    drop_vqpus
-    trap - EXIT
+    local k seq_done=0
+    for k in $CUNQA_VQPUS; do
+        # Sequential (one blocking circuit at a time) can't use more than one
+        # vQPU, so it only runs in the 1-vQPU configuration.
+        local methods=native,host
+        if (( k == 1 )); then methods=native,host,sequential; seq_done=1; fi
+        with_vqpus "$k" "$BIN" "${vqe_args[@]}" --methods "$methods" --vqpus "$k" \
+            > >(tee -a "$OUT_DIR/cunqa.log") 2>&1
+    done
+    if (( seq_done == 0 )); then
+        with_vqpus 1 "$BIN" "${vqe_args[@]}" --methods sequential --vqpus 1 \
+            > >(tee -a "$OUT_DIR/cunqa.log") 2>&1
+    fi
 }
 
 # ------------------------------------------------------------------ QMIO ----
@@ -220,31 +278,54 @@ run_qmio() {
 # -------------------------------------------------------- single circuit ----
 run_circuit() {
     section "Circuits (no VQE) -- devices: $CIRCUIT_DEVICES, modes: $CIRCUIT_MODES"
-    if [[ ",$CIRCUIT_DEVICES," == *",cunqa,"* ]]; then
-        # Latency only ever uses one vQPU; throughput needs max(CIRCUIT_VQPUS).
-        local wanted=1 v
-        if [[ ",$CIRCUIT_MODES," == *",throughput,"* ]]; then
-            for v in $CIRCUIT_VQPUS; do (( v > wanted )) && wanted=$v; done
+    local circ_args=(--circuits "$CIRCUIT_KINDS"
+                     --min-qubits "$CIRCUIT_MIN_Q" --max-qubits "$CIRCUIT_MAX_Q" --step "$CIRCUIT_STEP_Q"
+                     --reps "$REPS" --shots "$SHOTS" --repeats "$CIRCUIT_REPEATS"
+                     --time-limit "$CIRCUIT_TIME_LIMIT" --max-memory-gb "$CIRCUIT_MAX_MEM_GB"
+                     --batch-sizes "$CIRCUIT_BATCH_SIZES" --throughput-qubits "$CIRCUIT_TP_QUBITS"
+                     --throughput-csv "$OUT_DIR/circuit_throughput.csv" --csv "$OUT_DIR/circuit.csv")
+    : > "$OUT_DIR/circuit.log"
+
+    # Every device except CUNQA: one run.
+    local others
+    others=$(echo ",$CIRCUIT_DEVICES," | sed 's/,cunqa,/,/g; s/^,//; s/,$//')
+    if [[ -n "$others" ]]; then
+        if [[ ",$others," == *",qmio,"* ]]; then
+            mkdir -p "$STORE/.qpu"
+            echo "${ZMQ_SERVER:-}" > "$STORE/.qpu/zmq_server.txt"
         fi
-        raise_vqpus "$wanted" || echo "warning: vQPUs not raised, CUNQA may run on its CPU fallback" >&2
-    fi
-    if [[ ",$CIRCUIT_DEVICES," == *",qmio,"* ]]; then
-        mkdir -p "$STORE/.qpu"
-        echo "${ZMQ_SERVER:-}" > "$STORE/.qpu/zmq_server.txt"
+        "$CIRCUIT_BIN" "${circ_args[@]}" --devices "$others" --modes "$CIRCUIT_MODES" \
+            2>&1 | tee -a "$OUT_DIR/circuit.log"
     fi
 
-    "$CIRCUIT_BIN" --devices "$CIRCUIT_DEVICES" --circuits "$CIRCUIT_KINDS" \
-        --min-qubits "$CIRCUIT_MIN_Q" --max-qubits "$CIRCUIT_MAX_Q" --step "$CIRCUIT_STEP_Q" \
-        --reps "$REPS" --shots "$SHOTS" --repeats "$CIRCUIT_REPEATS" \
-        --time-limit "$CIRCUIT_TIME_LIMIT" --max-memory-gb "$CIRCUIT_MAX_MEM_GB" \
-        --modes "$CIRCUIT_MODES" --batch-sizes "$CIRCUIT_BATCH_SIZES" \
-        --throughput-qubits "$CIRCUIT_TP_QUBITS" --vqpus "$(echo "$CIRCUIT_VQPUS" | tr ' ' ',')" \
-        --throughput-csv "$OUT_DIR/circuit_throughput.csv" \
-        --csv "$OUT_DIR/circuit.csv" 2>&1 | tee "$OUT_DIR/circuit.log"
-
+    # CUNQA: each vQPU count raised on its own, always CUNQA_NODE_CORES in total.
     if [[ ",$CIRCUIT_DEVICES," == *",cunqa,"* ]]; then
-        drop_vqpus
-        trap - EXIT
+        CUNQA_PHASE=circuit
+        local latency=0 throughput=0
+        [[ ",$CIRCUIT_MODES," == *",latency,"* ]] && latency=1
+        [[ ",$CIRCUIT_MODES," == *",throughput,"* ]] && throughput=1
+
+        if [[ "$CUNQA_RAISE" != "1" ]]; then
+            echo "warning: CUNQA_RAISE=0, cores per vQPU are whatever the existing vQPUs were raised with" >&2
+            "$CIRCUIT_BIN" "${circ_args[@]}" --devices cunqa --modes "$CIRCUIT_MODES" \
+                --vqpus "$(echo "$CIRCUIT_VQPUS" | tr ' ' ',')" 2>&1 | tee -a "$OUT_DIR/circuit.log"
+            return
+        fi
+
+        local k lat_done=0
+        if (( throughput )); then
+            for k in $CIRCUIT_VQPUS; do
+                # Latency needs a single vQPU (with all the cores): reuse the 1-vQPU raise.
+                local modes=throughput
+                if (( k == 1 && latency )); then modes=latency,throughput; lat_done=1; fi
+                with_vqpus "$k" "$CIRCUIT_BIN" "${circ_args[@]}" --devices cunqa --modes "$modes" --vqpus "$k" \
+                    > >(tee -a "$OUT_DIR/circuit.log") 2>&1
+            done
+        fi
+        if (( latency && ! lat_done )); then
+            with_vqpus 1 "$CIRCUIT_BIN" "${circ_args[@]}" --devices cunqa --modes latency \
+                > >(tee -a "$OUT_DIR/circuit.log") 2>&1
+        fi
     fi
 }
 
