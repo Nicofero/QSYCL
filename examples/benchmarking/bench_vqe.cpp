@@ -202,7 +202,7 @@ public:
         if (fresh)
             out_ << "device,optimizer_device,method,vqpus,qubits,params,hamiltonian,groups,"
                     "circuits_per_iter,shots,iterations,evaluations,ms_per_iter,total_s,"
-                    "final_energy,used_native,backend_name\n";
+                    "final_energy,used_native,backend_name,status\n";
     }
     template <typename... Ts>
     void row(const Ts&... fields) {
@@ -217,7 +217,11 @@ private:
     std::ofstream out_;
 };
 
-std::string quoted(const std::string& s) { return "\"" + s + "\""; }
+std::string quoted(std::string s) {
+    std::replace(s.begin(), s.end(), '"', '\'');
+    std::replace(s.begin(), s.end(), '\n', ' ');
+    return "\"" + s + "\"";
+}
 
 } // namespace
 
@@ -258,6 +262,7 @@ int main(int argc, char** argv) {
                     }
                     const std::string backend_name = rt->device_name();
                     const std::size_t k_used = dev == DeviceType::CUNQA ? vqpus_in_use(backend_name) : 0;
+                    const std::size_t k_used_seq = dev == DeviceType::CUNQA ? vqpus_in_use(rt_seq->device_name()) : 0;
                     if (dev == DeviceType::CUNQA && k_used == 0) {
                         std::printf("%-6s WARNING: no vQPU found, CUNQA is running on its CPU fallback (%s)\n",
                                     dev_name.c_str(), backend_name.c_str());
@@ -267,7 +272,11 @@ int main(int argc, char** argv) {
                                     dev_name.c_str(), k, k_used);
                     }
 
-                    for (std::size_t n = cfg.min_q; n <= cfg.max_q; n += cfg.step) {
+                    // Set when a run fails or loses vQPUs: larger problems in this
+                    // configuration would only fail the same way (e.g. a vQPU that ran
+                    // out of memory), so the configuration stops there.
+                    std::string stop_reason;
+                    for (std::size_t n = cfg.min_q; n <= cfg.max_q && stop_reason.empty(); n += cfg.step) {
                         const Observable H = cfg.hamiltonian == "heisenberg"
                                                  ? hamiltonians::heisenberg_chain(n, 1.0, 1.0, false)
                                                  : hamiltonians::ising_chain(n, 1.0, 0.8, false);
@@ -299,6 +308,7 @@ int main(int argc, char** argv) {
                             VQAOptions o = opt;
                             o.max_iterations = sequential ? cfg.seq_iters : cfg.iters;
 
+                            const std::string out_opt = native ? opt_name : std::string("host");
                             RunResult r;
                             try {
                                 if (cfg.warmup > 0) {
@@ -309,27 +319,51 @@ int main(int argc, char** argv) {
                                 r = run_vqe(runtime, ansatz, H, o, theta0, native);
                             } catch (const std::exception& e) {
                                 std::printf("%-6s %-4s %-10s %5zu %6zu  FAILED: %s\n", dev_name.c_str(),
-                                            opt_name.c_str(), method.c_str(), k_used, n, e.what());
-                                continue;
+                                            out_opt.c_str(), method.c_str(), k_used, n, e.what());
+                                std::fflush(stdout);
+                                csv.row(dev_name, out_opt, method, k_used, n, ansatz.num_params(), cfg.hamiltonian,
+                                        groups, 0, is_shot_based(dev) ? cfg.shots : 0, 0, 0, 0, 0, 0, 0,
+                                        quoted(backend_name), quoted(std::string("failed: ") + e.what()));
+                                stop_reason = "a run failed at " + std::to_string(n) + " qubits";
+                                break;
+                            }
+
+                            // A CUNQA vQPU that dies mid-run (e.g. OOM-killed) is dropped and
+                            // its circuits re-run on the others: the row is then NOT a k-vQPU
+                            // measurement. Flag it instead of reporting it as one.
+                            std::string status = "ok";
+                            if (dev == DeviceType::CUNQA) {
+                                const std::size_t before = sequential ? k_used_seq : k_used;
+                                const std::size_t after = vqpus_in_use(runtime.device_name());
+                                if (after < before) {
+                                    status = "vqpu_lost: started with " + std::to_string(before) +
+                                             " vQPU(s), ended with " + std::to_string(after);
+                                    stop_reason = status;
+                                }
                             }
 
                             const double circ_per_it =
                                 static_cast<double>(r.res.evaluations) /
                                 static_cast<double>(std::max<std::size_t>(r.res.iterations, 1)) *
                                 static_cast<double>(is_shot_based(dev) ? groups : 1);
-                            const std::string notes =
+                            std::string notes =
                                 native && !r.res.used_native ? "native requested but backend ran host loop" : "";
+                            if (status != "ok") notes += (notes.empty() ? "" : "; ") + status;
                             std::printf("%-6s %-4s %-10s %5zu %6zu %6zu %8.0f | %12.3f %10.3f | %14.6f %s\n",
                                         dev_name.c_str(), native ? opt_name.c_str() : "host", method.c_str(),
                                         k_used, n, ansatz.num_params(), circ_per_it, r.ms_per_iter, r.total_s,
                                         r.res.energy, notes.c_str());
                             std::fflush(stdout);
-                            csv.row(dev_name, native ? opt_name : std::string("host"), method, k_used, n,
+                            csv.row(dev_name, out_opt, method, k_used, n,
                                     ansatz.num_params(), cfg.hamiltonian, groups, circ_per_it,
                                     is_shot_based(dev) ? cfg.shots : 0, r.res.iterations, r.res.evaluations,
                                     r.ms_per_iter, r.total_s, r.res.energy, r.res.used_native ? 1 : 0,
-                                    quoted(backend_name));
+                                    quoted(backend_name), quoted(status));
+                            if (!stop_reason.empty()) break;
                         }
+                    }
+                    if (!stop_reason.empty()) {
+                        std::printf("%-6s stopping this configuration: %s\n", dev_name.c_str(), stop_reason.c_str());
                     }
                 }
             }

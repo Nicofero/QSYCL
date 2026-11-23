@@ -303,9 +303,13 @@ std::string recv_string(zmq::socket_t& socket) {
     return std::string(static_cast<char*>(reply.data()), recv_size.value());
 }
 
-// 0 (the default) = wait for a vQPU's reply indefinitely, matching the
-// single-circuit path. Set it to have the batched dispatcher give up on an
-// unresponsive vQPU and re-queue its circuit on the others.
+// How long to wait for a vQPU's reply before treating it as dead. 0 (the
+// default) = wait indefinitely. A vQPU that is killed (e.g. OOM-killed by
+// SLURM) never answers -- ZMQ doesn't report a dead peer -- so without this a
+// lost vQPU blocks its caller forever. Applies to the batched dispatcher (the
+// circuit is re-queued on the other vQPUs) and to single-circuit sample()
+// (the call fails over to another vQPU). Set it above the longest legitimate
+// circuit time.
 std::chrono::milliseconds dispatch_timeout() {
     const char* v = std::getenv("CUNQA_RECV_TIMEOUT_MS");
     if (!v) return std::chrono::milliseconds(0);
@@ -337,6 +341,10 @@ struct CUNQABackend::QpuHandle {
         // Don't block destruction on unsent/unanswered messages to a vQPU
         // that has gone away.
         socket.set(zmq::sockopt::linger, 0);
+        // Bounds the blocking recv() of the single-circuit path; the batched
+        // dispatcher polls with the same timeout instead.
+        const auto timeout = dispatch_timeout();
+        if (timeout.count() > 0) socket.set(zmq::sockopt::rcvtimeo, static_cast<int>(timeout.count()));
         socket.connect(entry.endpoint);
     }
 };
@@ -360,6 +368,11 @@ void CUNQABackend::discover_qpus() {
     using_cunqa_ = false;
     try {
         auto candidates = read_registry();
+        // A killed vQPU can stay listed in the registry: never reconnect to
+        // one this backend has already seen die.
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                        [&](const QpuRegistryEntry& e) { return dead_endpoints_.count(e.endpoint) > 0; }),
+                         candidates.end());
         if (candidates.empty()) {
             std::cerr << "[CUNQABackend] no qraised QPU found in "
                       << cunqa_registry_path()
@@ -399,6 +412,11 @@ std::vector<CUNQABackend::QpuHandle*> CUNQABackend::eligible_qpus(std::size_t n)
         if (q->healthy && q->entry.max_qubits >= n) out.push_back(q.get());
     }
     return out;
+}
+
+void CUNQABackend::mark_dead(QpuHandle& qpu) {
+    qpu.healthy = false;
+    dead_endpoints_.insert(qpu.entry.endpoint);
 }
 
 std::size_t CUNQABackend::num_vqpus() const {
@@ -465,21 +483,26 @@ std::vector<unsigned long long> CUNQABackend::sample(
         return eligible[next_qpu_++ % eligible.size()];
     };
 
+    // Try every healthy vQPU in turn. One that fails (no reply within
+    // CUNQA_RECV_TIMEOUT_MS, connection error, ...) is taken out for good.
     QpuHandle* qpu = pick();
     if (!qpu) {
         throw std::runtime_error(
             "CUNQABackend: no healthy vQPU can run a " + std::to_string(num_qubits_) +
             "-qubit circuit");
     }
-    try {
-        return run_on_cunqa(*qpu, gate_buffer_, qubits, shots);
-    } catch (const VqpuReportedError&) {
-        throw; // the circuit is at fault, not the vQPU
-    } catch (const std::exception& e) {
-        // Submission failed at run time -- e.g. the qraised
-        // allocation's time box expired mid-session.
-        std::cerr << "[CUNQABackend] cunqa submission to vQPU '" << qpu->entry.id
-                  << "' failed (" << e.what() << "), re-checking QPU availability\n";
+    for (; qpu; qpu = pick()) {
+        try {
+            return run_on_cunqa(*qpu, gate_buffer_, qubits, shots);
+        } catch (const VqpuReportedError&) {
+            throw; // the circuit is at fault, not the vQPU
+        } catch (const std::exception& e) {
+            // Submission failed at run time -- e.g. the vQPU was OOM-killed or
+            // its time-boxed qraise allocation expired mid-session.
+            std::cerr << "[CUNQABackend] cunqa submission to vQPU '" << qpu->entry.id
+                      << "' failed (" << e.what() << "), dropping it\n";
+            mark_dead(*qpu);
+        }
     }
 
     // Re-probe once, then fall back if no vQPU is really left, replaying
@@ -498,7 +521,14 @@ std::vector<unsigned long long> CUNQABackend::sample(
             "CUNQABackend: no rediscovered vQPU can run a " + std::to_string(num_qubits_) +
             "-qubit circuit");
     }
-    return run_on_cunqa(*qpu, gate_buffer_, qubits, shots);
+    try {
+        return run_on_cunqa(*qpu, gate_buffer_, qubits, shots);
+    } catch (const VqpuReportedError&) {
+        throw;
+    } catch (...) {
+        mark_dead(*qpu);
+        throw;
+    }
 }
 
 std::vector<unsigned long long> CUNQABackend::run_on_cunqa(
@@ -544,7 +574,7 @@ std::vector<std::vector<unsigned long long>> CUNQABackend::dispatch(
     auto drop = [&](Worker& w, const std::string& why) {
         std::cerr << "[CUNQABackend] dropping vQPU '" << w.qpu->entry.id << "' (" << why
                   << ")" << (w.job >= 0 ? ", re-queueing its circuit" : "") << "\n";
-        w.qpu->healthy = false;
+        mark_dead(*w.qpu);
         if (w.job >= 0) pending.push_front(static_cast<std::size_t>(w.job));
         w.job = -1;
     };

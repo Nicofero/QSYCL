@@ -262,6 +262,18 @@ std::size_t vqpus_in_use(const std::string& device_name) {
     return 0;
 }
 
+// For CUNQA: "" if the runtime still has `expected` vQPUs, otherwise why not.
+// A vQPU that dies mid-measurement (e.g. OOM-killed) is dropped and the work
+// re-runs on the others (or on the CPU fallback): that point is then not a
+// measurement of the configuration it is labelled with.
+std::string vqpu_loss(DeviceType dev, const QuantumRuntime& rt, std::size_t expected) {
+    if (dev != DeviceType::CUNQA) return "";
+    const std::size_t now = vqpus_in_use(rt.device_name());
+    if (now >= expected) return "";
+    return "vqpu_lost: started with " + std::to_string(expected) + " vQPU(s), " +
+           (now ? "ended with " + std::to_string(now) : std::string("ended on the CPU fallback"));
+}
+
 double state_mb(DeviceType dev, std::size_t n) {
     return is_exact_simulator(dev) ? std::ldexp(16.0, static_cast<int>(n)) / (1024.0 * 1024.0) : 0.0;
 }
@@ -273,6 +285,7 @@ void run_latency(const Config& cfg, const std::string& dev_name, DeviceType dev,
     auto rt = make_runtime(dev_name, dev);
     if (!rt) return;
     const std::string backend_name = rt->device_name();
+    const std::size_t k_start = vqpus_in_use(backend_name);
     std::printf("-- latency on %s\n", backend_name.c_str());
     std::printf("%-6s %-16s %6s %7s | %11s %11s %11s %11s | %9s %s\n", "device", "circuit", "qubits", "gates",
                 "exec ms", "sample ms", "total ms", "min ms", "state MB", "status");
@@ -324,7 +337,13 @@ void run_latency(const Config& cfg, const std::string& dev_name, DeviceType dev,
 
             const Stats tot = stats(total_ms);
             if (status == "ok" && tot.median / 1e3 > cfg.time_limit_s) status = "time_limit";
+            const std::string lost = vqpu_loss(dev, *rt, k_start);
+            if (!lost.empty()) status = status == "ok" ? lost : lost + " (" + status + ")";
             report(stats(exec_ms), stats(sample_ms), tot, status);
+            if (!lost.empty()) {
+                std::printf("%-6s stopping: %s\n", dev_name.c_str(), lost.c_str());
+                return; // every later point would run on the wrong configuration
+            }
             if (status != "ok") break; // limit reached for this device/circuit
         }
     }
@@ -400,11 +419,18 @@ void run_throughput(const Config& cfg, const std::string& dev_name, DeviceType d
                     }
                     const Stats t = stats(ms);
                     if (status == "ok" && t.median / 1e3 > cfg.time_limit_s) status = "time_limit";
+                    const std::string lost = vqpu_loss(dev, *rt, k_used);
+                    if (!lost.empty()) status = status == "ok" ? lost : lost + " (" + status + ")";
                     report(t, status);
+                    if (!lost.empty()) {
+                        std::printf("%-6s stopping this vQPU configuration: %s\n", dev_name.c_str(), lost.c_str());
+                        goto next_configuration;
+                    }
                     if (status != "ok") break; // larger batches would only be worse
                 }
             }
         }
+    next_configuration:;
     }
 }
 

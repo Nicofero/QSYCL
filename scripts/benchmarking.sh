@@ -65,6 +65,11 @@ CUNQA_RAISE="${CUNQA_RAISE:-1}"
 # benchmarked and dropped on its own. Only applies when CUNQA_RAISE=1.
 CUNQA_NODE_CORES="${CUNQA_NODE_CORES:-64}"
 QRAISE_CORES_FLAG="${QRAISE_CORES_FLAG:--c}"   # qraise option for cores per vQPU
+# A vQPU that dies (e.g. OOM-killed: memory is split like the cores, so k vQPUs
+# get ~1/k of the node's memory each) never answers. After this long without a
+# reply it is treated as dead instead of hanging the job until its time limit.
+# Keep it above the longest legitimate single-circuit time.
+export CUNQA_RECV_TIMEOUT_MS="${CUNQA_RECV_TIMEOUT_MS:-900000}"   # 15 min
 QRAISE_TIME="${QRAISE_TIME:-05:00:00}"
 # Extra qraise flags. --co-located makes the vQPUs reachable over TCP from this
 # job's node. Check them against `qraise --help` for your CUNQA version.
@@ -210,9 +215,31 @@ raise_vqpus() {
         waited=$((waited + 5))
     done
     echo "$(registered_vqpus) vQPU(s) registered after ${waited}s"
+    # SLURM job(s) behind these vQPUs (registry ids look like <jobid>_<pid>),
+    # checked after the run for OOM kills -- see check_vqpu_jobs.
+    RAISED_JOB_IDS=$(python3 -c "import json,sys; print(','.join(sorted({k.split('_')[0] for k in json.load(open(sys.argv[1]))})))" "$CUNQA_REGISTRY" 2>/dev/null || true)
+    RAISED_COUNT="$wanted"
+    RAISED_CORES="$cores"
     # Which core split each configuration used, for the analysis.
     [[ -f "$OUT_DIR/vqpu_cores.csv" ]] || echo "mode,vqpus,cores_per_vqpu,total_cores" > "$OUT_DIR/vqpu_cores.csv"
     echo "${CUNQA_PHASE:-unknown},$wanted,$cores,$(( wanted * cores ))" >> "$OUT_DIR/vqpu_cores.csv"
+}
+
+# Logs the SLURM state of the vQPU job(s) of the current configuration to
+# <job>/vqpu_jobs.csv and warns about OOM kills. Rows marked "vqpu_lost" in
+# the benchmark CSVs can be matched to their cause here.
+check_vqpu_jobs() {
+    [[ -n "${RAISED_JOB_IDS:-}" ]] || { echo "warning: unknown vQPU job id(s), cannot check for OOM kills" >&2; return 0; }
+    local file="$OUT_DIR/vqpu_jobs.csv" lines
+    [[ -f "$file" ]] || echo "mode,vqpus,cores_per_vqpu,job_step,state,exit_code,max_rss,req_mem" > "$file"
+    lines=$(sacct -j "$RAISED_JOB_IDS" -n -P -o JobID,State,ExitCode,MaxRSS,ReqMem 2>/dev/null) || return 0
+    while IFS='|' read -r step state code rss req; do
+        [[ -n "$step" ]] && echo "${CUNQA_PHASE:-unknown},$RAISED_COUNT,$RAISED_CORES,$step,$state,$code,$rss,$req" >> "$file"
+    done <<< "$lines"
+    if grep -q "OUT_OF_ME" <<< "$lines"; then
+        echo "WARNING: a vQPU of the $RAISED_COUNT x $RAISED_CORES-core configuration was OOM-killed" \
+             "(see $file); rows after it are marked vqpu_lost or failed" >&2
+    fi
 }
 
 # with_vqpus <count> <command...>: raise, run, drop. With CUNQA_RAISE=0 it just runs.
@@ -221,6 +248,7 @@ with_vqpus() {
     raise_vqpus "$k" || { echo "error: could not raise $k vQPU(s), skipping this configuration" >&2; drop_vqpus; return 1; }
     "$@"
     local rc=$?
+    check_vqpu_jobs
     drop_vqpus
     trap - EXIT
     return $rc

@@ -4,6 +4,7 @@
 #include "cpu_backend.hpp"
 
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -87,6 +88,10 @@ private:
     // (e.g. a time-boxed qraise allocation expired mid-session).
     void discover_qpus();
 
+    // Takes a vQPU out for the rest of this backend's life, including across
+    // registry re-reads (a killed vQPU may stay listed there).
+    void mark_dead(QpuHandle& qpu);
+
     // Healthy vQPUs whose qubit count can hold an n-qubit circuit.
     std::vector<QpuHandle*> eligible_qpus(std::size_t n) const;
 
@@ -114,6 +119,7 @@ private:
     bool using_cunqa_ = false;
     std::unique_ptr<QpuPool> pool_;
     std::size_t next_qpu_ = 0; // round-robin cursor for single-circuit sample()
+    std::set<std::string> dead_endpoints_; // vQPUs seen dying; never reconnected
 
     // Used whenever no qraised QPU is found, or a cunqa submission fails.
     std::unique_ptr<Backend> fallback_;

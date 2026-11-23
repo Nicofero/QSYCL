@@ -35,6 +35,11 @@ Plot them with `results/benchmarking/analysis.ipynb`, a local notebook that is n
   - Pick vQPU counts that divide 64. The most you can go to is 64 vQPUs × 1 core.
   - If the `ilk` nodes don't have 64 cores (`sinfo -N -l -p ilk`), set `CUNQA_NODE_CORES` and the script's `#SBATCH -c` to the real count.
   - With `CUNQA_RAISE=0` the core split isn't controlled: the vQPUs keep whatever they were raised with.
+- [ ] **Expect OOM kills on the larger splits.** Memory is split like the cores, so 8 vQPUs × 8 cores have about 1/8 of the node's memory each, which is about 3 qubits fewer than one 64-core vQPU. A vQPU killed for running out of memory doesn't crash the benchmark:
+  - No reply within `CUNQA_RECV_TIMEOUT_MS` (default 15 min) and the vQPU is treated as dead. Keep this above the longest real circuit time.
+  - The affected row gets status `vqpu_lost` (or `failed`), and that configuration stops there, because bigger circuits would only fail the same way.
+  - After each configuration the script checks the vQPU job(s) with `sacct` and logs their state and peak memory to `<job>/vqpu_jobs.csv`. An OOM kill shows as `OUT_OF_MEMORY` there, and as a warning in the log.
+  - The vQPU job id is read from the registry ids (`<jobid>_<pid>`). Check once that this holds for your CUNQA version: the `job_step` column should show real job ids.
 - [ ] **Keep timings comparable.** Use the same node type for every CPU/CUNQA job. The `-c 64` in the script reserves your cores, but other jobs on the same node still share its memory bandwidth and network, which adds noise. To limit that:
   - Record the node of every job (`sacct -j <jobid> -o NodeList`) in the run log.
   - Compare numbers measured in the same job where possible: the methods and vQPU counts inside one run are measured back to back, on the same node.
@@ -69,7 +74,7 @@ Small and fast. Run them before anything long, because a timing from a wrong res
 sbatch --export=ALL,CIRCUIT_MODES=latency scripts/benchmarking.sh circuit
 ```
 - [ ] **CPU:** the sweep stops at `memory_limit` or `time_limit`. Record the largest qubit count that ran and its time.
-- [ ] **CUNQA:** with `exec` ≈ 0, all of the cost is in `sample` (the remote round trip). Record the fixed overhead at small n (the flat part of the curve) and the limit (the vQPU's maximum qubit count, or `time_limit`).
+- [ ] **CUNQA:** with `exec` ≈ 0, all of the cost is in `sample` (the remote round trip). Record the fixed overhead at small n (the flat part of the curve) and the limit: the vQPU's maximum qubit count, `time_limit`, or an OOM kill (`vqpu_lost`, confirmed in `vqpu_jobs.csv`).
 - [ ] **Crossover:** the qubit count where a single CUNQA circuit becomes cheaper than a local CPU simulation, if it exists.
 - [ ] **GPU:** rerun with `--export=ALL,CIRCUIT_DEVICES=gpu` on the GPU partition.
 - [ ] If the CPU sweep ends at `time_limit` before `memory_limit`, rerun with `CIRCUIT_TIME_LIMIT=300` to find the true memory limit.
@@ -118,6 +123,7 @@ Every configuration uses the same 64 cores (see Phase 0), so this answers "how s
 ```bash
 sbatch --export=ALL,CUNQA_VQPUS="1 2 4 8",CUNQA_MIN_Q=4,CUNQA_MAX_Q=16,CUNQA_STEP_Q=4 scripts/benchmarking.sh cunqa
 ```
+- [ ] Check `vqpu_jobs.csv` and the log for OOM kills first. A split that ran out of memory has no data beyond that qubit count. Record that as its limit, not as missing data.
 - [ ] Find the best vQPU count per qubit count. Gains now come from running more circuits at once, against fewer cores per circuit; the notebook's "efficiency" here is relative to one 64-core vQPU, not ideal linear scaling.
   - Job 618219 is **not** a reference for this: it used CUNQA's default 2 cores per vQPU, so adding vQPUs also added cores (8 vQPUs = 16 cores).
 - [ ] Compare the best CUNQA split with the CPU `host` time from Phase 4a at the same qubit counts: same 64 cores, two different simulators.
