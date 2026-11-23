@@ -56,6 +56,12 @@ qraise*
 # myfiles
 start_env_note.sh
 TODO
-# benchmark outputs
-results/
+# benchmark outputs (raw results ignored, analysis notebook tracked)
+results/**
+# !results/**/
+# !results/**/*.ipynb
 bench_vqe_*.out
+
+# Jupyter Notebook for analysis
+.venv
+.venv/**

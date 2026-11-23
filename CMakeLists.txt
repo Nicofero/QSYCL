@@ -291,6 +291,10 @@ option(BUILD_BENCH "Build the benchmarking executables" OFF)
 if(BUILD_BENCH)
     add_executable(bench_vqe examples/benchmarking/bench_vqe.cpp)
     target_link_libraries(bench_vqe PRIVATE quantum_algorithms)
+
+# Single-circuit latency and qubit limits per backend (no VQE batching).
+add_executable(bench_circuit examples/benchmarking/bench_circuit.cpp)
+target_link_libraries(bench_circuit PRIVATE quantum_algorithms)
 endif()
 
 # --- Tests (host-only logic: Param/bind/Observable/VQA) ---
