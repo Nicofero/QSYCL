@@ -168,6 +168,12 @@ Every circuit uses real QPU time, so keep runs minimal and check the queue first
   - QMIO vs CUNQA latency
 - [ ] **Record next to the numbers:** commit hash, node type, cores and memory per job, cores per vQPU, CUNQA version, shots, Hamiltonian, ansatz depth.
 
+## Phase 9: Comparison against other solutions
+
+- [ ] Test against Aer without connection delay
+- [ ] Test against other C++ simulators
+- [ ] Test against CUDAQ
+
 ## Run log
 
 | Phase | Job ID | Date | Node | Commit | Settings (`--export`) | Notes |
