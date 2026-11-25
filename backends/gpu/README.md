@@ -26,35 +26,113 @@ silent crashes rather than compile errors:
 
 ## GPU adapter note
 
-For Intel oneAPI versions 2025.3 or later, you need to build the GPU adapter from
-source. The instructions are the following ([see this issue](https://github.com/intel/llvm/issues/20945)):
+Since Intel oneAPI 2025.3, the CUDA adapter for SYCL is no longer shipped in the
+binary packages and has to be built from source
+([see this issue](https://github.com/intel/llvm/issues/20945)). The adapter **must be
+built from the intel/llvm release that matches your oneAPI version**: the oneAPI
+Unified Runtime (UR) loader and the adapter have to agree on the same API, otherwise
+`sycl-ls` segfaults.
 
-1. After setting the environment, make sure you have an appropriate CUDA toolkit
-   version (e.g. 12.3.0) in your environment.
-2. Clone the [llvm repo](https://github.com/intel/llvm):
+| oneAPI version | intel/llvm tag |
+| -------------- | -------------- |
+| 2025.3+         | `v6.3.1`       | 
+| 2026.0+         | `v7.2.0`       |
+
+For other versions, check the [intel/llvm releases](https://github.com/intel/llvm/releases):
+each release notes which oneAPI DPC++/C++ Compiler version it is closest to. Don't rely
+on the tag given in Intel's oneAPI release notes, which can be out of date.
+
+### Requirements
+
+- Intel oneAPI (the instructions below assume 2026.2).
+- **CUDA Toolkit 12.2 or newer**, including `nvcc`. The v7.x adapter uses
+  `cuMemAdvise_v2` and `CU_MEM_LOCATION_TYPE_HOST`, which don't exist in older
+  toolkits.
+- An NVIDIA driver that supports that CUDA version (check "CUDA Version" in
+  `nvidia-smi`).
+
+### Build
+
+1. Make sure the right CUDA toolkit is found first. Many distros ship an older
+   `nvidia-cuda-toolkit` package in `/usr` (e.g. CUDA 12.0), and CMake will pick it
+   up if `/usr/bin/nvcc` comes first in your `PATH`:
    ```bash
-   git clone https://github.com/intel/llvm.git
+   export CUDA_HOME=/usr/local/cuda-13.5   # adjust to your install
+   export PATH=$CUDA_HOME/bin:$PATH
+   which nvcc                              # must point inside $CUDA_HOME
    ```
-3. Checkout commit [`5c82df75db7d`](https://github.com/intel/llvm/commit/5c82df75db7d1619a1aebafc85b7c2d384415aaa):
+   If `$CUDA_HOME/bin/nvcc` doesn't exist, install the compiler for that toolkit
+   (e.g. `sudo apt install cuda-nvcc-13-5`).
+2. Clone the matching intel/llvm tag:
    ```bash
-   git checkout 5c82df75db7d
+   git clone https://github.com/intel/llvm -b v7.2.0 --depth=1
+   cd llvm
    ```
-4. `cd /path/to/llvm/unified-runtime`
-5. Configure the build:
+3. Configure the build, pointing CMake explicitly at your CUDA toolkit:
    ```bash
-   cmake -S . -B build -DUR_BUILD_TESTS=OFF -DUR_BUILD_ADAPTER_CUDA=ON -DCMAKE_BUILD_TYPE=RelWithDebugInfo -DCMAKE_INSTALL_PREFIX=/path/to/intel-unified-runtime-6.3.0-rc1
+   cmake -S unified-runtime -B build \
+     -DUR_BUILD_TESTS=OFF \
+     -DUR_ENABLE_TRACING=ON \
+     -DUR_BUILD_ADAPTER_CUDA=ON \
+     -DCMAKE_BUILD_TYPE=Release \
+     -DCUDAToolkit_ROOT=$CUDA_HOME \
+     -DCMAKE_CUDA_COMPILER=$CUDA_HOME/bin/nvcc \
+     -DCMAKE_INSTALL_PREFIX=/path/to/unified-runtime/install
    ```
-6. Build:
+4. Check that CMake found the right toolkit. This line must show paths inside
+   `$CUDA_HOME` and its version, not `/usr/include`:
+   ```bash
+   grep FIND_PACKAGE_MESSAGE_DETAILS_CUDAToolkit build/CMakeCache.txt
+   ```
+   If it's wrong, fix your `PATH` and run `rm -rf build` before configuring again:
+   CMake caches the toolkit it found and won't search again otherwise.
+5. Build and install:
    ```bash
    cmake --build build -j
-   ```
-7. Install:
-   ```bash
    cmake --install build
    ```
-8. Set paths appropriately:
-   ```bash
-   export LD_LIBRARY_PATH=${ONEAPI_ROOT}/compiler/latest/lib:$LD_LIBRARY_PATH
-   export UR_ADAPTERS_SEARCH_PATH=/path/to/install/lib
-   ```
-9. Check `sycl-ls` to confirm your GPU is being detected.
+
+### Use the adapter
+
+Make the oneAPI runtime find the new adapter, either through the search path:
+
+```bash
+source ${ONEAPI_ROOT}/setvars.sh
+export UR_ADAPTERS_SEARCH_PATH=/path/to/unified-runtime/install/lib
+```
+
+or by copying **only the CUDA adapter** into the oneAPI lib directory:
+
+```bash
+cp -P /path/to/unified-runtime/install/lib/libur_adapter_cuda.so* \
+  ${ONEAPI_ROOT}/compiler/latest/lib/
+```
+
+Don't copy the whole `libur*` set: that overwrites oneAPI's own UR loader and adapters
+with the versions you built.
+
+Then check that the GPU is detected:
+
+```bash
+sycl-ls
+```
+
+You should see a `[cuda:gpu]` entry. To compile for it:
+
+```bash
+icpx -fsycl -fsycl-targets=nvptx64-nvidia-cuda \
+  -Xsycl-target-backend --cuda-gpu-arch=sm_XX app.cpp -o app
+```
+
+### Troubleshooting
+
+- **`sycl-ls` segfaults after `dlsym failed to load function 'urGet...ProcAddrTable'`
+  errors:** the adapter was built from an intel/llvm version that doesn't match your
+  oneAPI version. Rebuild from the matching tag. You can compare the exported tables
+  with `nm -D libur_adapter_cuda.so.0 | grep ProcAddrTable` against oneAPI's
+  `libur_adapter_level_zero.so.0`.
+- **`'cuMemAdvise_v2' was not declared in this scope` or
+  `'CU_MEM_LOCATION_TYPE_HOST' was not declared`:** CMake is using a CUDA toolkit
+  older than 12.2. Go back to steps 1 and 4.
+- **To see which loader and adapters are actually loaded:**
+  `sycl-ls --verbose` or `LD_DEBUG=libs sycl-ls 2>&1 | grep libur`.
