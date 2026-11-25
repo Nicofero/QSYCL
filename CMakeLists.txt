@@ -24,6 +24,15 @@ endif()
 add_compile_options(-fsycl)
 add_link_options(-fsycl)
 
+# GPU builds: every target is compiled for CUDA and for spir64 (CPU), and every
+# executable is linked with both. The device images are packed into the binary at
+# the final executable link, so the targets must be set globally: a PRIVATE link
+# option on a static library is never applied to the executables that use it.
+if(ENABLE_GPU_BACKEND)
+    add_compile_options(-fsycl-targets=nvptx64-nvidia-cuda,spir64)
+    add_link_options(-fsycl-targets=nvptx64-nvidia-cuda,spir64)
+endif()
+
 # --- Core library: Circuit API + Runtime + device selector (device-agnostic) ---
 add_library(quantum_core
     src/circuit.cpp
@@ -77,11 +86,6 @@ target_include_directories(quantum_backend_cpu PUBLIC
 target_link_libraries(quantum_core PUBLIC quantum_backend_cpu)
 target_link_libraries(quantum_backend_cpu PUBLIC quantum_core)
 
-if(ENABLE_GPU_BACKEND)
-    target_compile_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
-    target_link_options(quantum_core PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
-endif()
-
 
 # --- GPU backend ---
 if(ENABLE_GPU_BACKEND)
@@ -94,9 +98,6 @@ if(ENABLE_GPU_BACKEND)
     )
     target_link_libraries(quantum_core PUBLIC quantum_backend_gpu)
     target_link_libraries(quantum_backend_gpu PUBLIC quantum_core)
-
-    target_compile_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
-    target_link_options(quantum_backend_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
 endif()
 
 
@@ -256,11 +257,10 @@ if(ENABLE_QPU_BACKEND)
 endif()
 
 # --- Example GPU ---
-# add_executable(bell_state_gpu examples/bell_state_gpu.cpp)
-# target_link_libraries(bell_state_gpu PRIVATE quantum_core)
-
-# target_compile_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
-# target_link_options(bell_state_gpu PRIVATE -fsycl-targets=nvptx64-nvidia-cuda)
+if(ENABLE_GPU_BACKEND)
+    add_executable(bell_state_gpu examples/bell_state_gpu.cpp)
+    target_link_libraries(bell_state_gpu PRIVATE quantum_core)
+endif()
 
 # --- Example CPU --- 
 add_executable(bell_state examples/bell_state.cpp)

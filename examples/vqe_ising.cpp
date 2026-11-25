@@ -12,7 +12,7 @@ int main() {
     Observable H = hamiltonians::ising_chain(n, /*J=*/1.0, /*h=*/0.8, /*periodic=*/false);
     Circuit ansatz = ansatz::real_amplitudes(n, /*reps=*/3, ansatz::Entanglement::Linear);
 
-    QuantumRuntime runtime(DeviceType::CPU);
+    QuantumRuntime runtime(DeviceType::GPU);
     std::cout << "Running on: " << runtime.device_name() << ", " << ansatz.num_params() << " parameters\n";
 
     VQEOptions opt;

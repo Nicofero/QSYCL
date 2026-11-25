@@ -19,6 +19,28 @@ All runs go through `scripts/benchmarking.sh`. Results land in `results/benchmar
 Plot them with `results/benchmarking/analysis.ipynb`, a local notebook that is not tracked by git
 (set `JOBS = [...]` in it to pick runs).
 
+**Local option (own GPU, no Slurm).** The GPU tests can also run on a workstation: call the script
+with `bash` instead of `sbatch` and pass settings as plain environment variables
+(`VAR=value scripts/benchmarking.sh <mode>`, comma lists included). Local runs are GPU only. The
+workstation's CPU is not benchmarked; GPU results are compared against the cluster CPU/CUNQA jobs.
+Results land in `results/benchmarking/local_<date>_<time>/`, together with a `system.txt` that
+records the machine, GPU, driver and commit. The local steps are marked **Local (GPU)** below.
+
+All local GPU runs, in plan order (from the repository root; `LOCAL=1` forces local mode, which is
+also detected automatically when there is no Slurm job):
+```bash
+# Phase 2: single-circuit latency and limits
+LOCAL=1 CIRCUIT_DEVICES=gpu CIRCUIT_MODES=latency bash scripts/benchmarking.sh circuit
+# Phase 3: circuit throughput
+LOCAL=1 CIRCUIT_DEVICES=gpu CIRCUIT_MODES=throughput CIRCUIT_BATCH_SIZES=1,8,32,128 CIRCUIT_TP_QUBITS=4,8,12,16 bash scripts/benchmarking.sh circuit
+# Phase 4c: VQE on the GPU (4-20 qubits), then larger sizes
+LOCAL=1 bash scripts/benchmarking.sh gpu
+LOCAL=1 MIN_Q=20 MAX_Q=22 STEP_Q=2 ITERS=3 SEQ_ITERS=1 bash scripts/benchmarking.sh gpu
+# Phase 4d: sensitivity
+LOCAL=1 HAMILTONIAN=heisenberg bash scripts/benchmarking.sh gpu
+LOCAL=1 REPS=4 bash scripts/benchmarking.sh gpu
+```
+
 ## Phase 0: preparation
 
 - [ ] **Pin down the code version.** Commit or stash all local changes, then write down `git rev-parse --short HEAD`. Every job in this plan must use the same build.
@@ -29,6 +51,14 @@ Plot them with `results/benchmarking/analysis.ipynb`, a local notebook that is n
   cmake -B build -DENABLE_CUNQA_BACKEND=ON -DENABLE_QPU_BACKEND=ON   # add -DENABLE_GPU_BACKEND=ON on a GPU build
   cmake --build build --target bench_vqe bench_circuit bell_state bell_state_cunqa bell_state_qpu
   ```
+  **Local (GPU):** no modules; the script sources `~/intel/oneapi/setvars.sh` itself (override with `ONEAPI_SETVARS`).
+  ```bash
+  source ~/intel/oneapi/setvars.sh
+  cmake -B build -DENABLE_GPU_BACKEND=ON -DBUILD_BENCH=ON
+  cmake --build build --target bench_vqe bench_circuit bell_state_gpu
+  ```
+  - Keep the GPU quiet during runs: close GPU-heavy applications and check with `nvidia-smi` that nothing else is running on it (on a desktop it also drives the display).
+  - Write the `local_...` folder name, GPU and driver (from `system.txt`) in the run log.
 - [ ] **Check the CUNQA commands for your version** (`qraise --help`, `qdrop --help`). The script runs `qraise -n N -t T -c C --co-located` and `qdrop --all`. If yours differ, override with `QRAISE_EXTRA`, `QRAISE_TIME` or `QRAISE_CORES_FLAG`.
   - `qdrop --all` drops **every** vQPU you own. Don't keep other vQPUs running during the benchmark. If you need to, raise the benchmark's vQPUs yourself and pass `CUNQA_RAISE=0`.
 - [ ] **Know the core budget.** Every CUNQA configuration uses one full node, the same 64 cores as QSYCL's CPU runs: k vQPUs are raised with 64/k cores each (1×64, 2×32, 4×16, 8×8, ...). Each vQPU count is raised, benchmarked and dropped on its own, and the split used is logged to `<job>/vqpu_cores.csv`.
@@ -67,6 +97,13 @@ Small and fast. Run them before anything long, because a timing from a wrong res
   ```
   No `failed:` rows.
 - [ ] Drop the vQPUs (`qdrop --all`).
+- [ ] **Local (GPU):**
+  ```bash
+  ./build/bell_state_gpu
+  ./build/bench_vqe --devices gpu --optimizers cpu,gpu --min-qubits 4 --max-qubits 6 --iters 3 --seq-iters 2
+  ./build/bench_circuit --devices gpu --modes latency,throughput --max-qubits 6 --batch-sizes 1,4 --throughput-qubits 4 --repeats 2
+  ```
+  `bell_state_gpu` must report the GPU as its device (e.g. `GPU (SYCL: NVIDIA ...)`) with counts about 50/50 on `00`/`11`; `native` and `host` must report **identical** final energies; no `failed:` rows.
 
 ## Phase 2: single circuit, latency and limits
 
@@ -77,6 +114,11 @@ sbatch --export=ALL,CIRCUIT_MODES=latency scripts/benchmarking.sh circuit
 - [ ] **CUNQA:** with `exec` ≈ 0, all of the cost is in `sample` (the remote round trip). Record the fixed overhead at small n (the flat part of the curve) and the limit: the vQPU's maximum qubit count, `time_limit`, or an OOM kill (`vqpu_lost`, confirmed in `vqpu_jobs.csv`).
 - [ ] **Crossover:** the qubit count where a single CUNQA circuit becomes cheaper than a local CPU simulation, if it exists.
 - [ ] **GPU:** rerun with `--export=ALL,CIRCUIT_DEVICES=gpu` on the GPU partition.
+  - **Local (GPU):**
+    ```bash
+    CIRCUIT_DEVICES=gpu CIRCUIT_MODES=latency scripts/benchmarking.sh circuit
+    ```
+    The memory guard is 80% of the GPU's memory, and it checks 2× the state vector (16 bytes per amplitude): with a 12 GB GPU the sweep should stop at 29 qubits with `memory_limit`. If it ends at `time_limit` first, rerun with `CIRCUIT_TIME_LIMIT=300` to find the true memory limit.
 - [ ] If the CPU sweep ends at `time_limit` before `memory_limit`, rerun with `CIRCUIT_TIME_LIMIT=300` to find the true memory limit.
 - [ ] **Use these limits to size Phases 4 and 5:** keep `MAX_Q` / `CUNQA_MAX_Q` below the largest qubit count that ran here. A VQE iteration runs dozens to hundreds of circuits, so set it well below the point where a single circuit takes seconds.
 
@@ -89,6 +131,10 @@ sbatch --export=ALL,CIRCUIT_MODES=throughput,CIRCUIT_VQPUS="1 2 4 8",CIRCUIT_BAT
 - [ ] With `batch = 1` only one vQPU is busy, so the rate drops as the vQPU count grows (fewer cores per vQPU). This is the cost of over-splitting when there isn't enough parallel work.
 - [ ] **Baseline for Phase 5:** this is the best scaling CUNQA can reach on raw circuits. Phase 5 compares the VQE against it; any gap is overhead the VQE adds on top of circuit execution.
 - [ ] **CPU:** throughput from the batched state-vector kernel. Compare with 1 / latency from Phase 2 to see what batching buys on the CPU itself.
+- [ ] **Local (GPU):** throughput from the batched kernel on the GPU. Compare with 1 / latency from the local Phase 2 GPU run to see what batching buys on the GPU.
+  ```bash
+  CIRCUIT_DEVICES=gpu CIRCUIT_MODES=throughput CIRCUIT_BATCH_SIZES=1,8,32,128 CIRCUIT_TP_QUBITS=4,8,12,16 scripts/benchmarking.sh circuit
+  ```
 
 ## Phase 4: VQE on the exact simulators
 
@@ -110,10 +156,25 @@ sbatch -p <gpu-partition> --gres=gpu:1 scripts/benchmarking.sh gpu
 ```
 - [ ] Compare against 4a with the same qubit counts. Look for the size where the GPU overtakes the CPU.
 - [ ] Optimizer on CPU vs GPU should make little difference: the update only touches O(params) numbers.
+- [ ] **Local (GPU):** same defaults as 4a (4–20 qubits, native / host / sequential, optimizer on CPU and GPU):
+  ```bash
+  scripts/benchmarking.sh gpu
+  ```
+  Then the larger sizes, as in 4b:
+  ```bash
+  MIN_Q=20 MAX_Q=22 STEP_Q=2 ITERS=3 SEQ_ITERS=1 scripts/benchmarking.sh gpu
+  ```
+  - Compare against the cluster CPU runs (4a, 4b) at the same qubit counts, not against the workstation's CPU.
+  - Keep `MAX_Q` ≤ 22: the CPU run 623082 failed at 24 qubits with a SYCL `int` index-range error, and the GPU is expected to fail the same way. Going higher needs a build with `-fsycl-id-queries-range=size_t`.
 
 **4d. Sensitivity.** Rerun 4a, once per variant, so every result isn't tied to a single problem shape.
 - [ ] More measurement groups: `--export=ALL,HAMILTONIAN=heisenberg` (3 groups instead of 2).
 - [ ] More parameters: `--export=ALL,REPS=4` (gradient batches about 1.7× larger).
+- [ ] **Local (GPU):** the same two variants on the GPU:
+  ```bash
+  HAMILTONIAN=heisenberg scripts/benchmarking.sh gpu
+  REPS=4 scripts/benchmarking.sh gpu
+  ```
 
 ## Phase 5: VQE on CUNQA, scaling with vQPUs
 
@@ -153,6 +214,7 @@ Every circuit uses real QPU time, so keep runs minimal and check the queue first
 ## Phase 7: repeatability
 
 - [ ] Rerun the key configurations (2, 3, 4a, 5a) **3 times as separate jobs**, ideally on different days or nodes.
+- [ ] **Local (GPU):** rerun the local Phase 2, 3 and 4c commands 3 times as separate runs, ideally on different days. Each run gets its own `local_<date>_<time>/` folder.
 - [ ] Load the jobs together in the notebook (`JOBS = [...]`) and check how much they vary. Treat any differences smaller than that variation as noise.
 
 ## Phase 8: analysis and report
@@ -166,6 +228,7 @@ Every circuit uses real QPU time, so keep runs minimal and check the queue first
   - native vs host
   - CUNQA VQE: best node split per qubit count, and how it compares with QSYCL's CPU on the same 64 cores
   - QMIO vs CUNQA latency
+  - GPU (local): largest qubit count and what stopped it, batching speed-up inside the VQE, and the qubit count where the GPU overtakes the cluster CPU
 - [ ] **Record next to the numbers:** commit hash, node type, cores and memory per job, cores per vQPU, CUNQA version, shots, Hamiltonian, ansatz depth.
 
 ## Phase 9: Comparison against other solutions
@@ -178,6 +241,19 @@ Every circuit uses real QPU time, so keep runs minimal and check the queue first
 
 | Phase | Job ID | Date | Node | Commit | Settings (`--export`) | Notes |
 |---|---|---|---|---|---|---|
-| 4a | 618219 | | | | defaults (cpu) | first run |
-| 5a | 618219 | | | | defaults (cunqa, 1 2 4 8 vQPUs) | first run; 2 cores per vQPU (before the 64-core split) |
+| 4a | 618219 | | ilk | | defaults (cpu) | first run; 4–20 qubits, 10 iterations |
+| 5a | 618219 | | ilk | | defaults (cunqa, 1 2 4 8 vQPUs) | first run; 2 cores per vQPU (before the 64-core split), not a reference for Phase 5 |
+| 2 | 622601 | | ilk | | `CIRCUIT_MODES=latency` | earlier latency run (before `note_bench.md`); used only for Phase 7 repeatability |
+| 2 | 622624 | | ilk | | `CIRCUIT_MODES=latency` | earlier latency run; used for Phase 7. CUNQA vQPU OOM-killed at 32 qubits (`vqpu_lost`, `OUT_OF_MEMORY` in `vqpu_jobs.csv`) |
+| 2 | 622641 | | ilk | | `CIRCUIT_MODES=latency` | CPU and CUNQA latency. CPU: 30 qubits max (backend cap; QFT `time_limit` at 29). CUNQA: 31 qubits (QFT `time_limit` at 31) |
+| 3 | 622797 | | ilk | | `CIRCUIT_MODES=throughput`, `CIRCUIT_VQPUS="1 2 4 8"`, `CIRCUIT_BATCH_SIZES="1,8,32,128"`, `CIRCUIT_TP_QUBITS="4,8,12,16"` | **incomplete**: only batch 1 at 4 qubits ran, because `sbatch --export` split the comma lists. Rerun with the lists set in the environment |
+| 4b | 623082 | | ilk | | `MIN_Q=20,MAX_Q=26,STEP_Q=2,ITERS=3,SEQ_ITERS=1` (cpu) | ran 2–22 qubits instead of 20–26; failed at 24 with the SYCL `int` index-range error (`-fsycl-id-queries-range=size_t`) |
+| 5a | 623879 | | ilk | | `CUNQA_VQPUS="1 2 4 8",CUNQA_MIN_Q=4,CUNQA_MAX_Q=16,CUNQA_STEP_Q=4` | 64 cores split over 1/2/4/8 vQPUs; no OOM kills |
+| 5b | 623956 | | ilk | | `CUNQA_VQPUS="8 16 32",CUNQA_MIN_Q=8,CUNQA_MAX_Q=16,CUNQA_STEP_Q=8` | 8/16/32 vQPUs + 1-vQPU sequential baseline; no gain beyond 16 vQPUs |
+| 6 | 623963 | | qpu | | `CIRCUIT_DEVICES=qmio,CIRCUIT_MODES=latency,CIRCUIT_MIN_Q=2,CIRCUIT_MAX_Q=6,CIRCUIT_REPEATS=3` | only `ghz`/`real_amplitudes` at 2 qubits ran; JSON reply error (`could not locate a bitstring->count object`) from 3 qubits, and for QFT at 2 |
+| 6 | 623967 | | qpu | | defaults (qmio) | 2 qubits ran; same JSON error at 4 qubits |
+| 2 (local) | local_20261125_121907 | 2026-11-25 | workstation (RTX 3080 Ti 12 GB, driver 595.99.02) | a460a0b + local changes | `CIRCUIT_DEVICES=gpu CIRCUIT_MODES=latency` | GPU latency; 28 qubits max, `memory_limit` at 29 (9 GB guard) |
+| 3 (local) | local_20261125_123213 | 2026-11-25 | workstation (RTX 3080 Ti) | a460a0b + local changes | `CIRCUIT_DEVICES=gpu CIRCUIT_MODES=throughput CIRCUIT_BATCH_SIZES=1,8,32,128 CIRCUIT_TP_QUBITS=4,8,12,16` | GPU throughput, full batch sweep |
+| 4c (local) | local_20261125_123348 | 2026-11-25 | workstation (RTX 3080 Ti) | a460a0b + local changes | `MIN_Q=4 MAX_Q=22 STEP_Q=2 ITERS=3 SEQ_ITERS=1` (gpu) | GPU VQE, 4–22 qubits, same iterations as 623082. Batched `host` slower than `sequential` from 14 qubits |
+| 4d (local) | — | | | | | not run (sensitivity, low priority) |
 | | | | | | | |

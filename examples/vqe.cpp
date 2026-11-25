@@ -54,7 +54,7 @@ int main() {
 
     // 3. Pick a device and let VQA choose the best execution strategy the
     //    backend supports (native -> batched -> sequential).
-    QuantumRuntime runtime(DeviceType::CUNQA);
+    QuantumRuntime runtime(DeviceType::GPU);
     std::cout << "Running on: " << runtime.device_name() << "\n";
 
     VQA vqa(runtime, ansatz, H);

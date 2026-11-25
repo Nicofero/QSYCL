@@ -27,6 +27,18 @@
 #
 #   Every knob below can be overridden without editing this file, e.g.:
 #     sbatch --export=ALL,MAX_Q=16,CUNQA_VQPUS="1 2 4 8 16" scripts/benchmarking.sh cunqa
+#   sbatch --export splits on commas, so pass comma lists through the environment:
+#     CIRCUIT_BATCH_SIZES=1,8,32,128 sbatch --export=ALL,CIRCUIT_MODES=throughput scripts/benchmarking.sh circuit
+#
+# Local run (own machine/GPU, no Slurm): run it with bash instead of sbatch, e.g.
+#     scripts/benchmarking.sh gpu
+#     CIRCUIT_DEVICES=gpu CIRCUIT_MAX_Q=28 scripts/benchmarking.sh circuit
+#   Detected automatically when SLURM_JOB_ID is unset (force with LOCAL=0/1). Locally:
+#     - oneAPI comes from ONEAPI_SETVARS (default ~/intel/oneapi/setvars.sh), no `module load`;
+#     - `all` runs cpu + gpu + circuit, and CIRCUIT_DEVICES defaults to cpu,gpu (no CUNQA);
+#     - the circuit memory guard is 80% of the machine's RAM (CPU) or of the GPU's memory (GPU);
+#     - results go to results/benchmarking/local_<date>_<time>/, with system.txt describing the machine.
+#   The benchmarks must be built: cmake -B build -DENABLE_GPU_BACKEND=ON -DBUILD_BENCH=ON
 #
 # Results: results/benchmarking/<jobid>/{<mode>.csv,<mode>.log}
 #          (circuit runs: circuit.csv, circuit_throughput.csv, circuit.log)
@@ -35,6 +47,15 @@
 set -uo pipefail
 
 MODE="${1:-all}"
+
+# Local (no Slurm) or cluster run
+if [[ -z "${LOCAL:-}" ]]; then
+    if [[ -n "${SLURM_JOB_ID:-}" ]]; then LOCAL=0; else LOCAL=1; fi
+fi
+if [[ "$LOCAL" == "1" ]]; then
+    # Paths below are relative to the repository root.
+    cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+fi
 
 # ---------------------------------------------------------------- knobs ----
 BIN="${BIN:-./build/bench_vqe}"
@@ -83,7 +104,11 @@ QMIO_STEP_Q="${QMIO_STEP_Q:-2}"
 QMIO_ITERS="${QMIO_ITERS:-3}"
 
 # Single circuit (bench_circuit): sweep qubits until a limit is hit
-CIRCUIT_DEVICES="${CIRCUIT_DEVICES:-cpu,cunqa}"
+if [[ "$LOCAL" == "1" ]]; then
+    CIRCUIT_DEVICES="${CIRCUIT_DEVICES:-cpu,gpu}"
+else
+    CIRCUIT_DEVICES="${CIRCUIT_DEVICES:-cpu,cunqa}"
+fi
 CIRCUIT_KINDS="${CIRCUIT_KINDS:-real_amplitudes,ghz,qft}"
 CIRCUIT_MIN_Q="${CIRCUIT_MIN_Q:-2}"
 CIRCUIT_MAX_Q="${CIRCUIT_MAX_Q:-34}"
@@ -94,25 +119,54 @@ CIRCUIT_MODES="${CIRCUIT_MODES:-latency,throughput}"
 CIRCUIT_BATCH_SIZES="${CIRCUIT_BATCH_SIZES:-1,8,32,128}"   # throughput: circuits per submission
 CIRCUIT_TP_QUBITS="${CIRCUIT_TP_QUBITS:-4,8,12,16}"        # throughput: qubit counts
 CIRCUIT_VQPUS="${CIRCUIT_VQPUS:-1 2 4 8}"                  # throughput on CUNQA: vQPU counts
-# Exact-simulator memory guard: 80% of this job's memory (0 = no guard).
-if [[ -n "${SLURM_MEM_PER_CPU:-}" && -n "${SLURM_CPUS_PER_TASK:-}" ]]; then
-    DEFAULT_MEM_GB=$(( SLURM_MEM_PER_CPU * SLURM_CPUS_PER_TASK * 8 / 10 / 1024 ))
-elif [[ -n "${SLURM_MEM_PER_NODE:-}" ]]; then
-    DEFAULT_MEM_GB=$(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
-else
-    DEFAULT_MEM_GB=0
-fi
-CIRCUIT_MAX_MEM_GB="${CIRCUIT_MAX_MEM_GB:-$DEFAULT_MEM_GB}"
+# Exact-simulator memory guard, in GB (0 = no guard). Setting CIRCUIT_MAX_MEM_GB
+# applies that value to every device; otherwise each device gets 80% of its own
+# memory (see mem_guard_gb).
+CIRCUIT_MAX_MEM_GB="${CIRCUIT_MAX_MEM_GB:-}"
+
+# Default guard for one device: 80% of this job's memory (CPU, from Slurm or, locally,
+# from /proc/meminfo) or of the first visible GPU's memory (GPU, from nvidia-smi).
+mem_guard_gb() {
+    local dev="$1"
+    if [[ -n "$CIRCUIT_MAX_MEM_GB" ]]; then echo "$CIRCUIT_MAX_MEM_GB"; return; fi
+    if [[ "$dev" == "gpu" ]]; then
+        local mib
+        mib=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        if [[ "$mib" =~ ^[0-9]+$ ]]; then echo $(( mib * 8 / 10 / 1024 )); else echo 0; fi
+    elif [[ -n "${SLURM_MEM_PER_CPU:-}" && -n "${SLURM_CPUS_PER_TASK:-}" ]]; then
+        echo $(( SLURM_MEM_PER_CPU * SLURM_CPUS_PER_TASK * 8 / 10 / 1024 ))
+    elif [[ -n "${SLURM_MEM_PER_NODE:-}" ]]; then
+        echo $(( SLURM_MEM_PER_NODE * 8 / 10 / 1024 ))
+    elif [[ "$LOCAL" == "1" ]]; then
+        awk '/^MemTotal:/ { printf "%d\n", $2 * 0.8 / 1024 / 1024 }' /proc/meminfo
+    else
+        echo 0
+    fi
+}
 
 # ---------------------------------------------------------- environment ----
-source "$STORE/intel/oneapi/setvars.sh" > /dev/null # Start SYCL interface
+if [[ "$LOCAL" == "1" ]]; then
+    ONEAPI_SETVARS="${ONEAPI_SETVARS:-$HOME/intel/oneapi/setvars.sh}"
+else
+    ONEAPI_SETVARS="${ONEAPI_SETVARS:-${STORE:-}/intel/oneapi/setvars.sh}"
+fi
+if [[ -z "${SETVARS_COMPLETED:-}" ]]; then        # not already sourced in this shell
+    if [[ ! -f "$ONEAPI_SETVARS" ]]; then
+        echo "error: oneAPI setvars.sh not found at $ONEAPI_SETVARS (set ONEAPI_SETVARS)" >&2
+        exit 1
+    fi
+    # setvars.sh is not written for `set -u`
+    set +u; source "$ONEAPI_SETVARS" > /dev/null; set -u   # Start SYCL interface
+fi
 
-# For CUNQA loading in qmio
-module load qmio/hpc gcc/12.3.0 cunqa/2.4.0-python-3.11.9-mpi
+if [[ "$LOCAL" != "1" ]]; then
+    # For CUNQA loading in qmio
+    module load qmio/hpc gcc/12.3.0 cunqa/2.4.0-python-3.11.9-mpi
+fi
 
 for b in "$BIN" "$CIRCUIT_BIN"; do
     if [[ ! -x "$b" ]]; then
-        echo "error: $b not found -- build first (cmake --build build --target bench_vqe bench_circuit)" >&2
+        echo "error: $b not found -- build first (cmake -B build -DBUILD_BENCH=ON ...; cmake --build build --target bench_vqe bench_circuit)" >&2
         exit 1
     fi
 done
@@ -120,6 +174,21 @@ done
 OUT_DIR="results/benchmarking/${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$OUT_DIR"
 echo "Results in $OUT_DIR"
+
+# What this run ran on (the plan asks to record it next to the numbers).
+{
+    echo "date:    $(date -Iseconds)"
+    echo "host:    $(hostname)"
+    echo "mode:    $MODE (local=$LOCAL)"
+    echo "commit:  $(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo ' (with local changes)')"
+    echo "cpu:     $(lscpu 2>/dev/null | awk -F': *' '/^Model name/ {print $2; exit}') ($(nproc) cores available)"
+    echo "memory:  $(awk '/^MemTotal:/ {printf "%.1f GB\n", $2 / 1024 / 1024}' /proc/meminfo)"
+    if command -v nvidia-smi > /dev/null 2>&1; then
+        echo "gpu:     $(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null | head -1)"
+    fi
+    echo "sycl:"
+    sycl-ls 2>/dev/null | sed 's/^/  /'
+} > "$OUT_DIR/system.txt"
 
 COMMON=(--hamiltonian "$HAMILTONIAN" --reps "$REPS" --iters "$ITERS"
         --seq-iters "$SEQ_ITERS" --shots "$SHOTS")
@@ -149,7 +218,7 @@ run_gpu() {
 }
 
 # ----------------------------------------------------------------- CUNQA ----
-CUNQA_REGISTRY="$STORE/.cunqa/qpus.json"
+CUNQA_REGISTRY="${STORE:-$HOME}/.cunqa/qpus.json"
 
 registered_vqpus() {
     python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$CUNQA_REGISTRY" 2>/dev/null || echo 0
@@ -289,8 +358,8 @@ run_cunqa() {
 # ------------------------------------------------------------------ QMIO ----
 run_qmio() {
     section "QMIO real QPU"
-    mkdir -p "$STORE/.qpu"
-    echo "${ZMQ_SERVER:-}" > "$STORE/.qpu/zmq_server.txt"
+    mkdir -p "${STORE:-$HOME}/.qpu"
+    echo "${ZMQ_SERVER:-}" > "${STORE:-$HOME}/.qpu/zmq_server.txt"
 
     # native and host only: for QMIO the batched path already submits one
     # circuit at a time, so "sequential" would just repeat "host". No warm-up:
@@ -300,7 +369,7 @@ run_qmio() {
         --min-qubits "$QMIO_MIN_Q" --max-qubits "$QMIO_MAX_Q" --step "$QMIO_STEP_Q" \
         --csv "$OUT_DIR/qmio.csv" 2>&1 | tee "$OUT_DIR/qmio.log"
 
-    echo "" > "$STORE/.qpu/zmq_server.txt"
+    echo "" > "${STORE:-$HOME}/.qpu/zmq_server.txt"
 }
 
 # -------------------------------------------------------- single circuit ----
@@ -309,22 +378,23 @@ run_circuit() {
     local circ_args=(--circuits "$CIRCUIT_KINDS"
                      --min-qubits "$CIRCUIT_MIN_Q" --max-qubits "$CIRCUIT_MAX_Q" --step "$CIRCUIT_STEP_Q"
                      --reps "$REPS" --shots "$SHOTS" --repeats "$CIRCUIT_REPEATS"
-                     --time-limit "$CIRCUIT_TIME_LIMIT" --max-memory-gb "$CIRCUIT_MAX_MEM_GB"
+                     --time-limit "$CIRCUIT_TIME_LIMIT"
                      --batch-sizes "$CIRCUIT_BATCH_SIZES" --throughput-qubits "$CIRCUIT_TP_QUBITS"
                      --throughput-csv "$OUT_DIR/circuit_throughput.csv" --csv "$OUT_DIR/circuit.csv")
     : > "$OUT_DIR/circuit.log"
 
-    # Every device except CUNQA: one run.
-    local others
-    others=$(echo ",$CIRCUIT_DEVICES," | sed 's/,cunqa,/,/g; s/^,//; s/,$//')
-    if [[ -n "$others" ]]; then
-        if [[ ",$others," == *",qmio,"* ]]; then
-            mkdir -p "$STORE/.qpu"
-            echo "${ZMQ_SERVER:-}" > "$STORE/.qpu/zmq_server.txt"
+    # Every device except CUNQA: one run per device, each with its own memory guard
+    # (the CSVs are appended to, so the rows end up in the same files).
+    local dev
+    for dev in $(echo "$CIRCUIT_DEVICES" | tr ',' ' '); do
+        [[ "$dev" == "cunqa" ]] && continue
+        if [[ "$dev" == "qmio" ]]; then
+            mkdir -p "${STORE:-$HOME}/.qpu"
+            echo "${ZMQ_SERVER:-}" > "${STORE:-$HOME}/.qpu/zmq_server.txt"
         fi
-        "$CIRCUIT_BIN" "${circ_args[@]}" --devices "$others" --modes "$CIRCUIT_MODES" \
-            2>&1 | tee -a "$OUT_DIR/circuit.log"
-    fi
+        "$CIRCUIT_BIN" "${circ_args[@]}" --max-memory-gb "$(mem_guard_gb "$dev")" \
+            --devices "$dev" --modes "$CIRCUIT_MODES" 2>&1 | tee -a "$OUT_DIR/circuit.log"
+    done
 
     # CUNQA: each vQPU count raised on its own, always CUNQA_NODE_CORES in total.
     if [[ ",$CIRCUIT_DEVICES," == *",cunqa,"* ]]; then
@@ -364,8 +434,9 @@ case "$MODE" in
     cunqa)   run_cunqa ;;
     qmio)    run_qmio ;;
     circuit) run_circuit ;;
-    all)     run_cpu; run_cunqa; run_circuit ;;
-    *)       echo "usage: sbatch scripts/benchmarking.sh [cpu|gpu|cunqa|qmio|circuit|all]" >&2; exit 1 ;;
+    all)     if [[ "$LOCAL" == "1" ]]; then run_cpu; run_gpu; run_circuit
+             else run_cpu; run_cunqa; run_circuit; fi ;;
+    *)       echo "usage: sbatch scripts/benchmarking.sh [cpu|gpu|cunqa|qmio|circuit|all]   (locally: scripts/benchmarking.sh ...)" >&2; exit 1 ;;
 esac
 
 section "Benchmarking done -- results in $OUT_DIR"
